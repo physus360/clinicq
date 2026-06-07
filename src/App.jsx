@@ -32,7 +32,7 @@ import {
 } from "firebase/firestore";
 import { db, storage, APP_URL } from "./firebase.js";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
-import { initCredentials, verifyLogin, changePassword, addRoomCredential, removeRoomCredential, fetchCredentials, onAuthChange, logout as logout_, signInWithGoogle } from "./auth.js";
+import { initCredentials, verifyLogin, changePassword, addRoomCredential, removeRoomCredential, fetchCredentials, onAuthChange, logout as logout_, signInWithGoogle, completeGoogleRedirect } from "./auth.js";
 
 const STATE_DOC = doc(db, "clinicq", "state");
 const AUDIT_COL = collection(db, "clinicq_audit");
@@ -231,6 +231,13 @@ export default function ClinicQ() {
     const onHash = () => setPage(window.location.hash.replace("#", "") || "lobby");
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  // Complete Google redirect sign-in if returning from redirect flow
+  useEffect(() => {
+    completeGoogleRedirect().then((r) => {
+      if (r?.success) { /* auth state listener will handle nav */ }
+    }).catch(() => {});
   }, []);
 
   // Redirect to login if trying to access protected page while not authenticated
