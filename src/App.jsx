@@ -20,6 +20,8 @@ import {
   doc,
   onSnapshot,
   setDoc,
+  getDoc,
+  deleteDoc,
   collection,
   addDoc,
   query,
@@ -34,9 +36,17 @@ import { db, storage, APP_URL } from "./firebase.js";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { initCredentials, verifyLogin, changePassword, addRoomCredential, removeRoomCredential, fetchCredentials, onAuthChange, logout as logout_, signInWithGoogle, completeGoogleRedirect } from "./auth.js";
 
-const STATE_DOC = doc(db, "clinicq", "state");
+const CONFIG_DOC = doc(db, "clinicq", "config");
+const ROOMS_COL = collection(db, "clinicq_rooms");
 const AUDIT_COL = collection(db, "clinicq_audit");
 const SESSIONS_COL = collection(db, "clinicq_sessions");
+
+const roomDoc = (id) => doc(db, "clinicq_rooms", id);
+
+// Per-room operational fields (live in clinicq_rooms/{id})
+const ROOM_FIELDS = ["assigned", "sessions", "nowServing", "upNext", "customCall", "status"];
+// Config fields (live in clinicq/config)
+const CONFIG_FIELDS = ["rooms", "doctorDirectory", "chime"];
 
 /* ─────────────────────────────────────────────
    CONSTANTS
@@ -66,50 +76,27 @@ const DEFAULT_STATE = {
   },
 };
 
-function buildInitial(rooms) {
-  const r = rooms || DEFAULT_ROOMS;
-  return {
-    ...DEFAULT_STATE,
-    rooms: r,
-    assigned: Object.fromEntries(r.map((id) => [id, null])),
-    sessions: Object.fromEntries(r.map((id) => [id, null])),
-    nowServing: Object.fromEntries(r.map((id) => [id, null])),
-    upNext: Object.fromEntries(r.map((id) => [id, null])),
-    customCall: Object.fromEntries(r.map((id) => [id, null])),
-    status: Object.fromEntries(r.map((id) => [id, "IDLE"])),
-    roomCredentials: Object.fromEntries(
-      r.map((id) => [
-        id,
-        { username: `room_${id.toLowerCase()}`, password: `room_${id.toLowerCase()}` },
-      ])
-    ),
-  };
-}
-
-function mergeState(remote) {
-  if (!remote) return buildInitial();
-  const rooms = remote.rooms || DEFAULT_ROOMS;
-  const base = buildInitial(rooms);
-  return {
-    ...base,
-    ...remote,
-    rooms,
-    assigned: { ...base.assigned, ...remote.assigned },
-    sessions: { ...base.sessions, ...remote.sessions },
-    nowServing: { ...base.nowServing, ...remote.nowServing },
-    upNext: { ...base.upNext, ...remote.upNext },
-    customCall: { ...base.customCall, ...remote.customCall },
-    status: { ...base.status, ...remote.status },
-    doctorDirectory: remote.doctorDirectory || {},
-    chime: { ...base.chime, ...(remote.chime || {}) },
-  };
-}
-
 /* ─────────────────────────────────────────────
-   FIREBASE HELPERS
+   FIREBASE HELPERS — config + per-room split
 ───────────────────────────────────────────── */
-async function pushState(next) {
-  await setDoc(STATE_DOC, next);
+// Write shared config (room list, doctor directory, chime)
+async function pushConfig(config) {
+  const payload = {};
+  CONFIG_FIELDS.forEach((f) => { if (config[f] !== undefined) payload[f] = config[f]; });
+  await setDoc(CONFIG_DOC, payload, { merge: true });
+}
+
+// Write a single room's operational data — only touches clinicq_rooms/{id}
+async function pushRoom(roomId, roomData) {
+  const payload = {};
+  ROOM_FIELDS.forEach((f) => {
+    payload[f] = roomData[f] !== undefined ? roomData[f] : null;
+  });
+  await setDoc(roomDoc(roomId), payload, { merge: true });
+}
+
+async function deleteRoomDoc(roomId) {
+  try { await deleteDoc(roomDoc(roomId)); } catch {}
 }
 
 async function logAudit(entry) {
@@ -171,27 +158,115 @@ function useChime(settings) {
 }
 
 /* ─────────────────────────────────────────────
-   SHARED STATE HOOK
+   SHARED STATE HOOK — reads config + all room docs,
+   merges into the same in-memory shape the portals expect.
 ───────────────────────────────────────────── */
 function useClinicState() {
-  const [state, setStateLocal] = useState(mergeState(null));
+  const [config, setConfig] = useState({ rooms: DEFAULT_ROOMS, doctorDirectory: {}, chime: DEFAULT_STATE.chime });
+  const [roomsData, setRoomsData] = useState({}); // roomId → { assigned, sessions, ... }
   const [ready, setReady] = useState(false);
+  const configRef = useRef(config);
+  const roomsRef = useRef(roomsData);
+  configRef.current = config;
+  roomsRef.current = roomsData;
 
+  // Subscribe to config doc
   useEffect(() => {
-    const unsub = onSnapshot(STATE_DOC, (snap) => {
-      setStateLocal(mergeState(snap.exists() ? snap.data() : null));
+    const unsub = onSnapshot(CONFIG_DOC, (snap) => {
+      const data = snap.exists() ? snap.data() : {};
+      setConfig({
+        rooms: data.rooms || DEFAULT_ROOMS,
+        doctorDirectory: data.doctorDirectory || {},
+        chime: { ...DEFAULT_STATE.chime, ...(data.chime || {}) },
+      });
       setReady(true);
     });
     return unsub;
   }, []);
 
+  // Subscribe to all room docs
+  useEffect(() => {
+    const unsub = onSnapshot(ROOMS_COL, (snap) => {
+      const next = {};
+      snap.forEach((d) => { next[d.id] = d.data(); });
+      setRoomsData(next);
+    });
+    return unsub;
+  }, []);
+
+  // Merge config + rooms into the flat shape portals use
+  const state = (() => {
+    const rooms = config.rooms || DEFAULT_ROOMS;
+    const merged = {
+      rooms,
+      doctorDirectory: config.doctorDirectory || {},
+      chime: config.chime,
+      assigned: {}, sessions: {}, nowServing: {}, upNext: {}, customCall: {}, status: {},
+    };
+    rooms.forEach((id) => {
+      const r = roomsData[id] || {};
+      merged.assigned[id]   = r.assigned ?? null;
+      merged.sessions[id]   = r.sessions ?? null;
+      merged.nowServing[id] = r.nowServing ?? null;
+      merged.upNext[id]     = r.upNext ?? null;
+      merged.customCall[id] = r.customCall ?? null;
+      merged.status[id]     = r.status ?? "IDLE";
+    });
+    return merged;
+  })();
+
+  // setState — accepts a full next-state object (back-compat with existing portals).
+  // Routes config fields to the config doc and any changed room fields to room docs.
   const setState = useCallback(async (next, audit) => {
-    setStateLocal(next);
-    await pushState(next);
+    const cur = { config: configRef.current, rooms: roomsRef.current };
+
+    // Detect config changes
+    const configChanged = CONFIG_FIELDS.some((f) =>
+      JSON.stringify(next[f]) !== JSON.stringify(cur.config[f])
+    );
+    if (configChanged) {
+      await pushConfig({ rooms: next.rooms, doctorDirectory: next.doctorDirectory, chime: next.chime });
+    }
+
+    // Detect per-room changes and write only those rooms
+    const roomIds = next.rooms || DEFAULT_ROOMS;
+    const writes = [];
+    roomIds.forEach((id) => {
+      const before = cur.rooms[id] || {};
+      const after = {
+        assigned: next.assigned?.[id] ?? null,
+        sessions: next.sessions?.[id] ?? null,
+        nowServing: next.nowServing?.[id] ?? null,
+        upNext: next.upNext?.[id] ?? null,
+        customCall: next.customCall?.[id] ?? null,
+        status: next.status?.[id] ?? "IDLE",
+      };
+      const changed = ROOM_FIELDS.some((f) =>
+        JSON.stringify(before[f] ?? (f === "status" ? "IDLE" : null)) !== JSON.stringify(after[f])
+      );
+      if (changed) writes.push(pushRoom(id, after));
+    });
+    await Promise.all(writes);
+
     if (audit) logAudit(audit);
   }, []);
 
-  return { state, setState, ready };
+  // setRoom — targeted single-room write. Pass the merged state, roomId, and a patch.
+  const setRoom = useCallback(async (roomId, patch, audit) => {
+    const before = roomsRef.current[roomId] || {};
+    const after = {
+      assigned:   patch.assigned   !== undefined ? patch.assigned   : (before.assigned ?? null),
+      sessions:   patch.sessions   !== undefined ? patch.sessions   : (before.sessions ?? null),
+      nowServing: patch.nowServing !== undefined ? patch.nowServing : (before.nowServing ?? null),
+      upNext:     patch.upNext     !== undefined ? patch.upNext     : (before.upNext ?? null),
+      customCall: patch.customCall !== undefined ? patch.customCall : (before.customCall ?? null),
+      status:     patch.status     !== undefined ? patch.status     : (before.status ?? "IDLE"),
+    };
+    await pushRoom(roomId, after);
+    if (audit) logAudit(audit);
+  }, []);
+
+  return { state, setState, setRoom, ready };
 }
 
 /* ─────────────────────────────────────────────
@@ -257,6 +332,13 @@ export default function ClinicQ() {
     if (page === "login") {
       navigate(role === "DEVELOPER" ? "developer" : role === "SUPERADMIN" ? "superadmin" : role === "ADMIN" ? "admin" : "doctor");
     }
+  }, [role, loading]);
+
+  // First-run seeding — only the authenticated Developer can write credentials
+  // under the locked Firestore rules. Runs once when a Developer signs in.
+  useEffect(() => {
+    if (loading || role !== "DEVELOPER") return;
+    initCredentials(DEFAULT_ROOMS).catch((e) => console.warn("Seeding:", e.message));
   }, [role, loading]);
 
   const navigate = (p) => {
@@ -500,10 +582,8 @@ function LoginPage({ navigate }) {
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
 
-  // Seed credentials on first visit if not yet initialised
-  useEffect(() => {
-    initCredentials(state.rooms || DEFAULT_ROOMS).catch(() => {});
-  }, []);
+  // Note: first-run seeding happens after Developer Google sign-in (see App root),
+  // since locked Firestore rules require authentication to write credentials.
 
   const submit = async () => {
     if (loading) return;
@@ -588,7 +668,7 @@ function LoginPage({ navigate }) {
    DOCTOR PORTAL
 ───────────────────────────────────────────── */
 function DoctorPortal({ room = "R01" }) {
-  const { state, setState, ready } = useClinicState();
+  const { state, setRoom, ready } = useClinicState();
   // room passed from App root via Firebase Auth state
   const play = useChime(state.chime);
 
@@ -598,20 +678,20 @@ function DoctorPortal({ room = "R01" }) {
   const status = state.status[room] || "IDLE";
   const session = state.sessions[room];
 
-  const act = async (next, auditAction, chimeType = "CALL") => {
-    await setState(next, { role: "DOCTOR", action: auditAction, room, ts: Date.now() });
+  // Write only this room's document, then chime
+  const act = async (patch, auditAction, chimeType = "CALL") => {
+    await setRoom(room, patch, { role: "DOCTOR", action: auditAction, room, ts: Date.now() });
     play(chimeType, { force: true });
   };
 
   const startSession = () => {
     const tokenStart = 1;
     act({
-      ...state,
-      sessions: { ...state.sessions, [room]: { startedAt: Date.now(), tokenStart, served: 0 } },
-      nowServing: { ...state.nowServing, [room]: tokenStart },
-      upNext: { ...state.upNext, [room]: tokenStart + 1 },
-      customCall: { ...state.customCall, [room]: null },
-      status: { ...state.status, [room]: "SESSION STARTED" },
+      sessions: { startedAt: Date.now(), tokenStart, served: 0 },
+      nowServing: tokenStart,
+      upNext: tokenStart + 1,
+      customCall: null,
+      status: "SESSION STARTED",
     }, "startSession", "CALL");
   };
 
@@ -636,12 +716,11 @@ function DoctorPortal({ room = "R01" }) {
       } catch (e) { console.warn("Session save failed:", e.message); }
     }
     act({
-      ...state,
-      sessions: { ...state.sessions, [room]: sess ? { ...sess, endedAt } : null },
-      nowServing: { ...state.nowServing, [room]: null },
-      upNext: { ...state.upNext, [room]: null },
-      customCall: { ...state.customCall, [room]: null },
-      status: { ...state.status, [room]: "SESSION ENDED" },
+      sessions: null,
+      nowServing: null,
+      upNext: null,
+      customCall: null,
+      status: "SESSION ENDED",
     }, "endSession", "END");
   };
 
@@ -650,43 +729,37 @@ function DoctorPortal({ room = "R01" }) {
     const next = cur + 1;
     const sess = state.sessions[room];
     act({
-      ...state,
-      nowServing: { ...state.nowServing, [room]: next },
-      upNext: { ...state.upNext, [room]: next + 1 },
-      customCall: { ...state.customCall, [room]: null },
-      status: { ...state.status, [room]: "CALLING" },
-      sessions: sess ? { ...state.sessions, [room]: { ...sess, served: (sess.served || 0) + 1 } } : state.sessions,
+      nowServing: next,
+      upNext: next + 1,
+      customCall: null,
+      status: "CALLING",
+      sessions: sess ? { ...sess, served: (sess.served || 0) + 1 } : null,
     }, "next", "CALL");
   };
 
   const prevToken = () => {
     const cur = Math.max(1, (state.nowServing[room] || 1) - 1);
     act({
-      ...state,
-      nowServing: { ...state.nowServing, [room]: cur },
-      upNext: { ...state.upNext, [room]: cur + 1 },
-      customCall: { ...state.customCall, [room]: null },
-      status: { ...state.status, [room]: "CALLING" },
+      nowServing: cur,
+      upNext: cur + 1,
+      customCall: null,
+      status: "CALLING",
     }, "previous", "CALL");
   };
 
   const pauseResume = () => {
     const next = status === "PAUSED" ? "CALLING" : "PAUSED";
-    act({ ...state, status: { ...state.status, [room]: next } }, next === "PAUSED" ? "pause" : "resume", "CALL");
+    act({ status: next }, next === "PAUSED" ? "pause" : "resume", "CALL");
   };
 
   const recall = () => {
-    act({ ...state, status: { ...state.status, [room]: "RECALL" } }, "recall", "RECALL");
+    act({ status: "RECALL" }, "recall", "RECALL");
   };
 
   const customCall = () => {
     const value = prompt("Enter custom token to call:");
     if (!value) return;
-    act({
-      ...state,
-      customCall: { ...state.customCall, [room]: value },
-      status: { ...state.status, [room]: "CALLING" },
-    }, "customCall", "CALL");
+    act({ customCall: value, status: "CALLING" }, "customCall", "CALL");
   };
 
   const manualToken = () => {
@@ -694,11 +767,10 @@ function DoctorPortal({ room = "R01" }) {
     const n = parseInt(val, 10);
     if (isNaN(n) || n < 1) return;
     act({
-      ...state,
-      nowServing: { ...state.nowServing, [room]: n },
-      upNext: { ...state.upNext, [room]: n + 1 },
-      customCall: { ...state.customCall, [room]: null },
-      status: { ...state.status, [room]: "CALLING" },
+      nowServing: n,
+      upNext: n + 1,
+      customCall: null,
+      status: "CALLING",
     }, "manualToken", "CALL");
   };
 
@@ -771,7 +843,7 @@ function DoctorPortal({ room = "R01" }) {
    ADMIN PORTAL
 ───────────────────────────────────────────── */
 function AdminPortal() {
-  const { state, setState, ready } = useClinicState();
+  const { state, setRoom, ready } = useClinicState();
   const [tab, setTab] = useState("rooms");
   const [auditLog, setAuditLog] = useState([]);
   const [auditLoading, setAuditLoading] = useState(false);
@@ -780,35 +852,27 @@ function AdminPortal() {
 
   const assign = async (roomId, doctorId) => {
     const doc = doctorId ? state.doctorDirectory[doctorId] : null;
-    const next = {
-      ...state,
-      assigned: {
-        ...state.assigned,
-        [roomId]: doc ? { id: doc.id, name: doc.name, department: doc.specialty || "General" } : null,
-      },
+    await setRoom(roomId, {
+      assigned: doc ? { id: doc.id, name: doc.name, department: doc.specialty || "General" } : null,
       // Reset room to a clean slate for the newly assigned doctor
-      status:     { ...state.status,     [roomId]: doc ? "IDLE" : "IDLE" },
-      sessions:   { ...state.sessions,   [roomId]: null },
-      nowServing: { ...state.nowServing, [roomId]: null },
-      upNext:     { ...state.upNext,     [roomId]: null },
-      customCall: { ...state.customCall, [roomId]: null },
-    };
-    await setState(next, { role: "ADMIN", action: "assignDoctor", roomId, doctorId });
+      status: "IDLE",
+      sessions: null,
+      nowServing: null,
+      upNext: null,
+      customCall: null,
+    }, { role: "ADMIN", action: "assignDoctor", roomId, doctorId });
   };
 
   const endSession = async (roomId) => {
     if (!window.confirm(`End session for ${roomId}?`)) return;
-    const sess = state.sessions[roomId];
-    const next = {
-      ...state,
-      assigned: { ...state.assigned, [roomId]: null },
-      sessions: { ...state.sessions, [roomId]: sess ? { ...sess, endedAt: Date.now() } : null },
-      nowServing: { ...state.nowServing, [roomId]: null },
-      upNext: { ...state.upNext, [roomId]: null },
-      customCall: { ...state.customCall, [roomId]: null },
-      status: { ...state.status, [roomId]: "SESSION ENDED" },
-    };
-    await setState(next, { role: "ADMIN", action: "endSession", roomId });
+    await setRoom(roomId, {
+      assigned: null,
+      sessions: null,
+      nowServing: null,
+      upNext: null,
+      customCall: null,
+      status: "SESSION ENDED",
+    }, { role: "ADMIN", action: "endSession", roomId });
   };
 
   const loadAudit = async () => {
@@ -1012,11 +1076,8 @@ function SuperAdminPortal() {
   const removeRoom = async (id) => {
     if (!window.confirm(`Remove room ${id}? This cannot be undone.`)) return;
     const rooms = (state.rooms || []).filter((r) => r !== id);
-    const next = { ...state, rooms };
-    ["assigned", "sessions", "nowServing", "upNext", "customCall", "status"].forEach((k) => {
-      if (next[k]) { next[k] = { ...next[k] }; delete next[k][id]; }
-    });
-    await saveState(next, { role: "SUPERADMIN", action: "removeRoom", id });
+    await saveState({ ...state, rooms }, { role: "SUPERADMIN", action: "removeRoom", id });
+    await deleteRoomDoc(id);
     await removeRoomCredential(id);
   };
 
@@ -1198,9 +1259,8 @@ function DeveloperPortal() {
   const removeRoom = async (id) => {
     if (!window.confirm(`Remove room ${id}?`)) return;
     const rooms = (state.rooms || []).filter((r) => r !== id);
-    const next = { ...state, rooms };
-    ["assigned","sessions","nowServing","upNext","customCall","status"].forEach((k) => { if (next[k]) { next[k] = { ...next[k] }; delete next[k][id]; } });
-    await setState(next, { role: "DEVELOPER", action: "removeRoom", id });
+    await setState({ ...state, rooms }, { role: "DEVELOPER", action: "removeRoom", id });
+    await deleteRoomDoc(id);
     await removeRoomCredential(id);
   };
 
@@ -1747,6 +1807,32 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 .lobby-grid-2 { grid-template-columns: repeat(2, 1fr); }
 .lobby-grid-3 { grid-template-columns: repeat(3, 1fr); }
 .lobby-grid-4 { grid-template-columns: repeat(4, 1fr); }
+
+/* Tablet — drop to 2 columns */
+@media (max-width: 900px) {
+  .lobby-grid-3, .lobby-grid-4 { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* Phone — single column, stacked, header wraps */
+@media (max-width: 600px) {
+  .lobby { padding: 1rem; }
+  .lobby-grid, .lobby-grid-1, .lobby-grid-2, .lobby-grid-3, .lobby-grid-4 {
+    grid-template-columns: 1fr; max-width: 100%;
+  }
+  .lobby-header { flex-wrap: wrap; gap: 1rem; margin-bottom: 1.25rem; }
+  .lobby-brand { min-width: auto; flex: 1; }
+  .lobby-center { order: 3; width: 100%; justify-content: flex-start; }
+  .lobby-time { font-size: 1.4rem; }
+  .lobby-logo-img { max-height: 44px; max-width: 160px; }
+  .lobby-logo-text { font-size: 1.1rem; }
+  .lobby-room-id { font-size: 1.4rem; }
+  .lobby-doctor { font-size: 1.05rem; }
+  .lobby-token-num { font-size: 3rem; }
+  .lobby-token-next, .lobby-token-waiting { font-size: 1.8rem !important; }
+  .lobby-card { padding: 1.25rem; }
+  /* Hide the QR + fullscreen on phone — they're already on it */
+  .lobby-right { display: none; }
+}
 
 .lobby-card {
   background: #0d1119; border: 1px solid var(--accent, #ffffff12);

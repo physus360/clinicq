@@ -162,11 +162,21 @@ export async function initCredentials(rooms) {
 }
 
 async function _createAuthAccount(email, password) {
+  // Create the account on a SECONDARY Firebase app instance so we don't
+  // disturb the currently signed-in user (e.g. the Developer running setup).
+  const { initializeApp, deleteApp } = await import("firebase/app");
+  const { getAuth: getSecondaryAuth, createUserWithEmailAndPassword: createOnSecondary, signOut: signOutSecondary } = await import("firebase/auth");
+  const { firebaseConfig } = await import("./firebase.js");
+  let secondaryApp;
   try {
-    await createUserWithEmailAndPassword(auth, email, password);
-    await signOut(auth);
+    secondaryApp = initializeApp(firebaseConfig, "secondary-" + Date.now());
+    const secondaryAuth = getSecondaryAuth(secondaryApp);
+    await createOnSecondary(secondaryAuth, email, password);
+    await signOutSecondary(secondaryAuth);
   } catch (e) {
     if (e.code !== "auth/email-already-in-use") console.warn("Auth account:", e.message);
+  } finally {
+    if (secondaryApp) { try { await deleteApp(secondaryApp); } catch {} }
   }
 }
 
@@ -183,41 +193,34 @@ async function _addRoomToCredDoc(roomId, existingCreds) {
 
 /* ─────────────────────────────────────────────
    LOGIN (username + password roles)
+   Firebase Auth is the source of truth for the password.
+   We authenticate FIRST (works without Firestore access),
+   then the creds doc is readable because we're now signed in.
 ───────────────────────────────────────────── */
 export async function verifyLogin(role, username, password, room = null) {
-  const creds = await fetchCredentials();
-  if (!creds) throw new Error("System not initialised. Please wait and try again.");
-
-  const hash = await sha256(password);
-  let match = false;
-
-  if (role === "SUPERADMIN") {
-    match = creds.superadmin?.username === username && creds.superadmin?.passwordHash === hash;
-  } else if (role === "ADMIN") {
-    match = creds.admin?.username === username && creds.admin?.passwordHash === hash;
-  } else if (role === "DOCTOR") {
-    if (!room) return { success: false, error: "No room selected." };
-    const rc = creds.rooms?.[room];
-    match = rc?.username === username && rc?.passwordHash === hash;
+  let email;
+  try {
+    email = roleToEmail(role, room);
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+  if (role === "DOCTOR" && !room) {
+    return { success: false, error: "No room selected." };
   }
 
-  if (!match) return { success: false, error: "Invalid username or password." };
-
   try {
-    const email = roleToEmail(role, room);
     await signInWithEmailAndPassword(auth, email, password);
     return { success: true };
   } catch (e) {
-    if (e.code === "auth/user-not-found" || e.code === "auth/invalid-credential") {
-      await _createAuthAccount(roleToEmail(role, room), password);
-      try {
-        await signInWithEmailAndPassword(auth, roleToEmail(role, room), password);
-        return { success: true };
-      } catch (e2) {
-        return { success: false, error: "Auth account mismatch. Contact your administrator." };
-      }
+    if (e.code === "auth/invalid-credential" ||
+        e.code === "auth/wrong-password" ||
+        e.code === "auth/user-not-found") {
+      return { success: false, error: "Invalid username or password." };
     }
-    return { success: false, error: "Authentication failed: " + e.message };
+    if (e.code === "auth/too-many-requests") {
+      return { success: false, error: "Too many attempts. Please wait a moment and try again." };
+    }
+    return { success: false, error: "Sign-in failed: " + e.message };
   }
 }
 
