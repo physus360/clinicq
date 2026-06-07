@@ -16,6 +16,8 @@ import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   signOut,
   onAuthStateChanged,
   updatePassword,
@@ -66,11 +68,44 @@ export function onAuthChange(callback) {
 
 /* ─────────────────────────────────────────────
    GOOGLE SIGN-IN (Developer only)
+   Tries popup; falls back to redirect if COOP blocks it.
 ───────────────────────────────────────────── */
 export async function signInWithGoogle() {
-  const result = await signInWithPopup(auth, googleProvider);
-  const email = result.user.email;
-  if (email !== DEVELOPER_EMAIL) {
+  try {
+    const result = await signInWithPopup(auth, googleProvider);
+    return _validateDeveloper(result.user);
+  } catch (e) {
+    // Popup blocked (COOP / popup-blocked / closed) → use redirect flow
+    if (
+      e.code === "auth/popup-blocked" ||
+      e.code === "auth/popup-closed-by-user" ||
+      e.code === "auth/cancelled-popup-request" ||
+      e.message?.includes("Cross-Origin-Opener-Policy")
+    ) {
+      await signInWithRedirect(auth, googleProvider);
+      return { success: true, redirecting: true };
+    }
+    return { success: false, error: e.message };
+  }
+}
+
+// Called on app load to complete a redirect-based sign-in
+export async function completeGoogleRedirect() {
+  try {
+    const result = await getRedirectResult(auth);
+    if (result?.user) return _validateDeveloper(result.user);
+    return { success: false, noRedirect: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+async function _validateDeveloper(user) {
+  if (!DEVELOPER_EMAIL) {
+    await signOut(auth);
+    return { success: false, error: "Developer email not configured. Set VITE_DEVELOPER_EMAIL." };
+  }
+  if (user.email !== DEVELOPER_EMAIL) {
     await signOut(auth);
     return { success: false, error: `Access denied. Only ${DEVELOPER_EMAIL} can sign in as Developer.` };
   }
