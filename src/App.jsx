@@ -779,6 +779,12 @@ function AdminPortal() {
         ...state.assigned,
         [roomId]: doc ? { id: doc.id, name: doc.name, department: doc.specialty || "General" } : null,
       },
+      // Reset room to a clean slate for the newly assigned doctor
+      status:     { ...state.status,     [roomId]: doc ? "IDLE" : "IDLE" },
+      sessions:   { ...state.sessions,   [roomId]: null },
+      nowServing: { ...state.nowServing, [roomId]: null },
+      upNext:     { ...state.upNext,     [roomId]: null },
+      customCall: { ...state.customCall, [roomId]: null },
     };
     await setState(next, { role: "ADMIN", action: "assignDoctor", roomId, doctorId });
   };
