@@ -174,14 +174,34 @@ function useClinicState() {
   const [config, setConfig] = useState({ rooms: DEFAULT_ROOMS, doctorDirectory: {}, chime: DEFAULT_STATE.chime, schedule: DEFAULT_SCHEDULE });
   const [roomsData, setRoomsData] = useState({}); // roomId → { assigned, sessions, ... }
   const [ready, setReady] = useState(false);
+  const [online, setOnline] = useState(true);
   const configRef = useRef(config);
   const roomsRef = useRef(roomsData);
+  const lastUpdateRef = useRef(Date.now());
   configRef.current = config;
   roomsRef.current = roomsData;
 
+  // Browser-level online/offline
+  useEffect(() => {
+    const goOnline = () => setOnline(true);
+    const goOffline = () => setOnline(false);
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    setOnline(navigator.onLine);
+    return () => {
+      window.removeEventListener("online", goOnline);
+      window.removeEventListener("offline", goOffline);
+    };
+  }, []);
+
   // Subscribe to config doc
   useEffect(() => {
-    const unsub = onSnapshot(CONFIG_DOC, (snap) => {
+    const unsub = onSnapshot(CONFIG_DOC, { includeMetadataChanges: true }, (snap) => {
+      // fromCache + no pending writes after initial load = likely disconnected
+      if (!snap.metadata.fromCache) {
+        setOnline(true);
+        lastUpdateRef.current = Date.now();
+      }
       const data = snap.exists() ? snap.data() : {};
       setConfig({
         rooms: data.rooms || DEFAULT_ROOMS,
@@ -190,7 +210,7 @@ function useClinicState() {
         schedule: { ...DEFAULT_SCHEDULE, ...(data.schedule || {}) },
       });
       setReady(true);
-    });
+    }, () => setOnline(false));
     return unsub;
   }, []);
 
@@ -277,7 +297,7 @@ function useClinicState() {
     if (audit) logAudit(audit);
   }, []);
 
-  return { state, setState, setRoom, ready };
+  return { state, setState, setRoom, ready, online };
 }
 
 /* ─────────────────────────────────────────────
@@ -567,7 +587,7 @@ function ClosedSplash({ schedule }) {
 }
 
 function Lobby() {
-  const { state, setRoom, ready } = useClinicState();
+  const { state, setRoom, ready, online } = useClinicState();
   const [tick, setTick] = useState(0);
   const [fullscreen, setFullscreen] = useState(false);
   const lobbyRef = useRef(null);
@@ -631,6 +651,12 @@ function Lobby() {
 
   return (
     <div className="lobby" ref={lobbyRef}>
+      {!online && (
+        <div className="offline-banner">
+          <span className="offline-dot" />
+          Connection lost — display may be showing outdated information
+        </div>
+      )}
       <div className="lobby-header">
         <div className="lobby-brand">
           <LobbyLogo />
@@ -642,6 +668,7 @@ function Lobby() {
           </div>
         </div>
         <div className="lobby-right">
+          <span className={`conn-dot ${online ? "conn-online" : "conn-offline"}`} title={online ? "Connected" : "Disconnected"} />
           <LobbyQR url={APP_URL} />
           <button className="lobby-fs-btn" onClick={toggleFullscreen} title={fullscreen ? "Exit fullscreen" : "Fullscreen"}>
             {fullscreen ? "⛶" : "⛶"}
@@ -1674,6 +1701,47 @@ function AnalyticsTab() {
   const maxHour = Math.max(...byHour, 1);
   const busiestHour = byHour.indexOf(Math.max(...byHour));
 
+  // CSV export helpers
+  const downloadCSV = (filename, rows) => {
+    const escape = (v) => {
+      const s = String(v ?? "");
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const csv = rows.map((r) => r.map(escape).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const exportSessions = () => {
+    const header = ["Date", "Room", "Doctor", "Department", "Start", "End", "Duration (min)", "Tokens served"];
+    const rows = sessions.map((s) => [
+      s.date,
+      s.room,
+      s.doctor,
+      s.department || "",
+      s.startedAt?.toDate ? s.startedAt.toDate().toLocaleString() : "",
+      s.endedAt?.toDate ? s.endedAt.toDate().toLocaleString() : "",
+      s.durationMin,
+      s.tokensServed,
+    ]);
+    downloadCSV(`clinicq-sessions_${from}_to_${to}.csv`, [header, ...rows]);
+  };
+
+  const exportDoctorSummary = () => {
+    const header = ["Doctor", "Sessions", "Tokens served", "Total time (min)", "Avg tokens/session"];
+    const rows = Object.entries(byDoctor)
+      .sort((a, b) => b[1].tokens - a[1].tokens)
+      .map(([name, d]) => [name, d.sessions, d.tokens, d.duration, Math.round(d.tokens / d.sessions)]);
+    downloadCSV(`clinicq-doctor-summary_${from}_to_${to}.csv`, [header, ...rows]);
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
       {/* Date filter */}
@@ -1689,6 +1757,13 @@ function AnalyticsTab() {
           </div>
           <button className="btn btn-blue" style={{ marginTop: "1rem" }} onClick={load} disabled={loading}>
             {loading ? "Loading…" : "Apply"}
+          </button>
+          <div style={{ flex: 1 }} />
+          <button className="btn btn-outline" style={{ marginTop: "1rem" }} onClick={exportSessions} disabled={sessions.length === 0}>
+            ⬇ Sessions CSV
+          </button>
+          <button className="btn btn-outline" style={{ marginTop: "1rem" }} onClick={exportDoctorSummary} disabled={sessions.length === 0}>
+            ⬇ Doctor summary CSV
           </button>
         </div>
       </div>
@@ -2048,6 +2123,26 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 .lobby-logo-text { font-family: 'Space Grotesk', sans-serif; font-size: 1.4rem; font-weight: 700; letter-spacing: -0.02em; }
 .lobby-qr-wrap { display: flex; flex-direction: column; align-items: center; gap: 4px; }
 .lobby-qr-label { font-size: 0.6rem; opacity: 0.35; letter-spacing: 0.06em; text-transform: uppercase; }
+
+/* CONNECTION INDICATOR */
+.offline-banner {
+  position: sticky; top: 0; z-index: 50;
+  background: #dc2626; color: #fff;
+  text-align: center; padding: 0.6rem 1rem;
+  font-size: 0.95rem; font-weight: 600; letter-spacing: 0.01em;
+  display: flex; align-items: center; justify-content: center; gap: 0.6rem;
+  margin: -1.5rem -1.5rem 1.25rem;
+  animation: bannerSlide 0.3s ease-out;
+}
+@keyframes bannerSlide { from { transform: translateY(-100%); } to { transform: translateY(0); } }
+.offline-dot {
+  width: 9px; height: 9px; border-radius: 50%; background: #fff;
+  animation: blink 1s ease-in-out infinite;
+}
+@keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+.conn-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.conn-online { background: #22c55e; box-shadow: 0 0 6px #22c55e88; }
+.conn-offline { background: #dc2626; box-shadow: 0 0 6px #dc2626; animation: blink 1s ease-in-out infinite; }
 
 /* CLOSED SPLASH */
 .splash { position: relative; width: 100%; min-height: 100vh; background: #060810; display: flex; align-items: center; justify-content: center; overflow: hidden; }
