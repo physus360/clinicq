@@ -1477,6 +1477,8 @@ function DeveloperPortal() {
         )}
 
         {tab === "branding" && <BrandingTab />}
+        {tab === "schedule" && <ScheduleTab state={state} setState={setState} />}
+        {tab === "analytics" && <AnalyticsTab />}
       </div>
     </div>
   );
