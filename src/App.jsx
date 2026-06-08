@@ -46,7 +46,7 @@ const roomDoc = (id) => doc(db, "clinicq_rooms", id);
 // Per-room operational fields (live in clinicq_rooms/{id})
 const ROOM_FIELDS = ["assigned", "sessions", "nowServing", "upNext", "customCall", "status"];
 // Config fields (live in clinicq/config)
-const CONFIG_FIELDS = ["rooms", "doctorDirectory", "chime"];
+const CONFIG_FIELDS = ["rooms", "doctorDirectory", "chime", "schedule"];
 
 /* ─────────────────────────────────────────────
    CONSTANTS
@@ -54,8 +54,16 @@ const CONFIG_FIELDS = ["rooms", "doctorDirectory", "chime"];
 const APP_VERSION = "2.0";
 const CLINIC_NAME = "Noosandha Clinic";
 const LOGO_PATH = "clinicq/logo";
+const SPLASH_PATH = "clinicq/splash";
 
 const DEFAULT_ROOMS = ["R01", "R02", "R03", "R04", "R05"];
+
+const DEFAULT_SCHEDULE = {
+  openTime: "08:00",   // splash → live queue
+  closeTime: "17:00",  // live queue → splash
+  clearTime: "06:00",  // auto-clear yesterday's tokens
+  enabled: true,       // master toggle for the splash/schedule feature
+};
 
 const DEFAULT_STATE = {
   rooms: DEFAULT_ROOMS,
@@ -66,6 +74,7 @@ const DEFAULT_STATE = {
   customCall: {},     // roomId → string | null
   status: {},         // roomId → "IDLE"|"SESSION STARTED"|"CALLING"|"PAUSED"|"RECALL"|"SESSION ENDED"
   doctorDirectory: {},// id → { id, name, specialty, active }
+  schedule: DEFAULT_SCHEDULE,
   chime: {
     enabled: true,
     volume: 0.22,
@@ -162,7 +171,7 @@ function useChime(settings) {
    merges into the same in-memory shape the portals expect.
 ───────────────────────────────────────────── */
 function useClinicState() {
-  const [config, setConfig] = useState({ rooms: DEFAULT_ROOMS, doctorDirectory: {}, chime: DEFAULT_STATE.chime });
+  const [config, setConfig] = useState({ rooms: DEFAULT_ROOMS, doctorDirectory: {}, chime: DEFAULT_STATE.chime, schedule: DEFAULT_SCHEDULE });
   const [roomsData, setRoomsData] = useState({}); // roomId → { assigned, sessions, ... }
   const [ready, setReady] = useState(false);
   const configRef = useRef(config);
@@ -178,6 +187,7 @@ function useClinicState() {
         rooms: data.rooms || DEFAULT_ROOMS,
         doctorDirectory: data.doctorDirectory || {},
         chime: { ...DEFAULT_STATE.chime, ...(data.chime || {}) },
+        schedule: { ...DEFAULT_SCHEDULE, ...(data.schedule || {}) },
       });
       setReady(true);
     });
@@ -201,6 +211,7 @@ function useClinicState() {
       rooms,
       doctorDirectory: config.doctorDirectory || {},
       chime: config.chime,
+      schedule: config.schedule,
       assigned: {}, sessions: {}, nowServing: {}, upNext: {}, customCall: {}, status: {},
     };
     rooms.forEach((id) => {
@@ -225,7 +236,7 @@ function useClinicState() {
       JSON.stringify(next[f]) !== JSON.stringify(cur.config[f])
     );
     if (configChanged) {
-      await pushConfig({ rooms: next.rooms, doctorDirectory: next.doctorDirectory, chime: next.chime });
+      await pushConfig({ rooms: next.rooms, doctorDirectory: next.doctorDirectory, chime: next.chime, schedule: next.schedule });
     }
 
     // Detect per-room changes and write only those rooms
@@ -501,11 +512,66 @@ function LobbyCard({ id, state }) {
 /* ─────────────────────────────────────────────
    LOBBY (TV display)
 ───────────────────────────────────────────── */
+/* ─────────────────────────────────────────────
+   SCHEDULE HELPERS
+───────────────────────────────────────────── */
+function hhmmToMin(s) {
+  const [h, m] = (s || "0:0").split(":").map(Number);
+  return h * 60 + (m || 0);
+}
+
+// Is the clinic open right now per the schedule?
+function isClinicOpen(schedule) {
+  if (!schedule?.enabled) return true; // feature off → always show live queue
+  const now = new Date();
+  const cur = now.getHours() * 60 + now.getMinutes();
+  const open = hhmmToMin(schedule.openTime || "08:00");
+  const close = hhmmToMin(schedule.closeTime || "17:00");
+  if (open === close) return true;
+  if (open < close) return cur >= open && cur < close;
+  return cur >= open || cur < close; // overnight span
+}
+
+/* ─────────────────────────────────────────────
+   CLOSED SPLASH — full custom PNG with clock + QR
+───────────────────────────────────────────── */
+function ClosedSplash({ schedule }) {
+  const [splashUrl, setSplashUrl] = useState(null);
+  const [tick, setTick] = useState(0);
+  useEffect(() => { const t = setInterval(() => setTick((n) => n + 1), 1000); return () => clearInterval(t); }, []);
+  useEffect(() => {
+    getDownloadURL(ref(storage, SPLASH_PATH)).then(setSplashUrl).catch(() => setSplashUrl(null));
+  }, []);
+
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+  return (
+    <div className="splash">
+      {splashUrl
+        ? <img src={splashUrl} alt="Clinic closed" className="splash-img" />
+        : (
+          <div className="splash-fallback">
+            <div className="splash-logo">{CLINIC_NAME}</div>
+            <div className="splash-closed">Closed</div>
+            <div className="splash-hours">Opens at {schedule?.openTime || "08:00"}</div>
+          </div>
+        )
+      }
+      <div className="splash-overlay">
+        <div className="splash-clock">{timeStr}</div>
+        <LobbyQR url={APP_URL} />
+      </div>
+    </div>
+  );
+}
+
 function Lobby() {
-  const { state, ready } = useClinicState();
+  const { state, setRoom, ready } = useClinicState();
   const [tick, setTick] = useState(0);
   const [fullscreen, setFullscreen] = useState(false);
   const lobbyRef = useRef(null);
+  const lastClearRef = useRef(null);
 
   useEffect(() => { const t = setInterval(() => setTick((n) => n + 1), 1000); return () => clearInterval(t); }, []);
 
@@ -523,9 +589,43 @@ function Lobby() {
     }
   };
 
+  // Daily auto-clear: once per day at the configured clearTime, wipe yesterday's
+  // tokens/status on all rooms (keeps doctor assignments).
+  useEffect(() => {
+    if (!ready || !state.schedule?.enabled) return;
+    const now = new Date();
+    const cur = now.getHours() * 60 + now.getMinutes();
+    const clearAt = hhmmToMin(state.schedule.clearTime || "06:00");
+    const todayKey = now.toISOString().slice(0, 10);
+    const storedKey = localStorage.getItem("cq_last_clear");
+
+    // Within a 2-minute window of clearTime, and not already cleared today
+    if (cur >= clearAt && cur < clearAt + 2 && storedKey !== todayKey && lastClearRef.current !== todayKey) {
+      lastClearRef.current = todayKey;
+      localStorage.setItem("cq_last_clear", todayKey);
+      (state.rooms || DEFAULT_ROOMS).forEach((id) => {
+        if (state.status[id] !== "IDLE" || state.nowServing[id] != null) {
+          setRoom(id, {
+            sessions: null, nowServing: null, upNext: null,
+            customCall: null, status: "IDLE",
+          }, { role: "SYSTEM", action: "dailyAutoClear", room: id });
+        }
+      });
+    }
+  }, [tick, ready]);
+
   const now = new Date();
   const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const dateStr = now.toLocaleDateString([], { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+
+  // Outside opening hours → show the closed splash
+  if (ready && !isClinicOpen(state.schedule)) {
+    return (
+      <div className="lobby" ref={lobbyRef} style={{ padding: 0 }}>
+        <ClosedSplash schedule={state.schedule} />
+      </div>
+    );
+  }
 
   const rooms = (state.rooms || DEFAULT_ROOMS).filter((id) => state.assigned[id]);
 
@@ -1109,9 +1209,9 @@ function SuperAdminPortal() {
         </div>
 
         <div className="tab-bar">
-          {["doctors", "rooms", "credentials", "chime", "branding"].map((t) => (
+          {["doctors", "rooms", "credentials", "chime", "branding", "schedule"].map((t) => (
             <button key={t} className={`tab-btn${tab === t ? " active" : ""}`} onClick={() => setTab(t)}>
-              {t === "doctors" ? "👤 Doctors" : t === "rooms" ? "🏥 Rooms" : t === "credentials" ? "🔑 Credentials" : t === "chime" ? "🔔 Chime" : "🎨 Branding"}
+              {t === "doctors" ? "👤 Doctors" : t === "rooms" ? "🏥 Rooms" : t === "credentials" ? "🔑 Credentials" : t === "chime" ? "🔔 Chime" : t === "branding" ? "🎨 Branding" : "🕐 Schedule"}
             </button>
           ))}
         </div>
@@ -1204,6 +1304,7 @@ function SuperAdminPortal() {
         )}
 
         {tab === "branding" && <BrandingTab />}
+        {tab === "schedule" && <ScheduleTab state={state} setState={setState} />}
       </div>
     </div>
   );
@@ -1291,9 +1392,9 @@ function DeveloperPortal() {
         </div>
 
         <div className="tab-bar">
-          {["doctors","rooms","credentials","chime","branding","analytics"].map((t) => (
+          {["doctors","rooms","credentials","chime","branding","schedule","analytics"].map((t) => (
             <button key={t} className={`tab-btn${tab===t?" active":""}`} onClick={() => setTab(t)}>
-              {t==="doctors"?"👤 Doctors":t==="rooms"?"🏥 Rooms":t==="credentials"?"🔑 Credentials":t==="chime"?"🔔 Chime":t==="branding"?"🎨 Branding":"📊 Analytics"}
+              {t==="doctors"?"👤 Doctors":t==="rooms"?"🏥 Rooms":t==="credentials"?"🔑 Credentials":t==="chime"?"🔔 Chime":t==="branding"?"🎨 Branding":t==="schedule"?"🕐 Schedule":"📊 Analytics"}
             </button>
           ))}
         </div>
@@ -1389,28 +1490,29 @@ function DeveloperPortal() {
 ───────────────────────────────────────────── */
 function BrandingTab() {
   const [logoUrl, setLogoUrl] = useState(null);
+  const [splashUrl, setSplashUrl] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [msg, setMsg] = useState("");
-  const inputRef = useRef(null);
+  const logoInputRef = useRef(null);
+  const splashInputRef = useRef(null);
 
   useEffect(() => {
-    getDownloadURL(ref(storage, LOGO_PATH))
-      .then(setLogoUrl)
-      .catch(() => setLogoUrl(null));
+    getDownloadURL(ref(storage, LOGO_PATH)).then(setLogoUrl).catch(() => setLogoUrl(null));
+    getDownloadURL(ref(storage, SPLASH_PATH)).then(setSplashUrl).catch(() => setSplashUrl(null));
   }, []);
 
-  const handleUpload = async (e) => {
-    const file = e.target.files?.[0];
+  const upload = async (file, path, setUrl, label) => {
     if (!file) return;
     if (!file.type.startsWith("image/")) { setMsg("Please select an image file."); return; }
-    if (file.size > 2 * 1024 * 1024) { setMsg("File must be under 2MB."); return; }
+    const maxMb = path === SPLASH_PATH ? 5 : 2;
+    if (file.size > maxMb * 1024 * 1024) { setMsg(`File must be under ${maxMb}MB.`); return; }
     setUploading(true); setMsg("");
     try {
-      const storageRef = ref(storage, LOGO_PATH);
+      const storageRef = ref(storage, path);
       await uploadBytes(storageRef, file, { contentType: file.type });
       const url = await getDownloadURL(storageRef);
-      setLogoUrl(url);
-      setMsg("✓ Logo uploaded successfully. Lobby will update automatically.");
+      setUrl(url);
+      setMsg(`✓ ${label} uploaded. Lobby updates automatically.`);
     } catch (e) {
       setMsg("Upload failed: " + e.message);
     } finally {
@@ -1419,29 +1521,96 @@ function BrandingTab() {
   };
 
   return (
-    <div className="card">
-      <h2 className="card-title">Lobby Branding</h2>
-      <p className="dim" style={{ fontSize: "0.83rem", marginBottom: "1.5rem" }}>
-        The logo appears in the top-left of the lobby TV display. Recommended: PNG with transparent background, min 300px wide.
-      </p>
-      <div style={{ display: "flex", gap: "2rem", alignItems: "flex-start", flexWrap: "wrap" }}>
-        <div style={{ flex: "1", minWidth: "200px" }}>
-          <div className="field-label" style={{ marginBottom: "0.5rem" }}>Current logo</div>
-          <div style={{ background: "#0d1119", borderRadius: "12px", padding: "1.5rem", minHeight: "100px", display: "flex", alignItems: "center", justifyContent: "center" }}>
-            {logoUrl
-              ? <img src={logoUrl} alt="Clinic logo" style={{ maxHeight: "80px", maxWidth: "200px", objectFit: "contain" }} />
-              : <div style={{ color: "#ffffff44", fontSize: "0.85rem" }}>No logo uploaded yet — showing clinic name</div>
-            }
+    <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+      <div className="card">
+        <h2 className="card-title">Lobby Logo</h2>
+        <p className="dim" style={{ fontSize: "0.83rem", marginBottom: "1.5rem" }}>
+          Appears top-left of the live lobby. Recommended: PNG with transparent background.
+        </p>
+        <div style={{ display: "flex", gap: "2rem", alignItems: "flex-start", flexWrap: "wrap" }}>
+          <div style={{ flex: "1", minWidth: "200px" }}>
+            <div className="field-label" style={{ marginBottom: "0.5rem" }}>Current logo</div>
+            <div style={{ background: "#0d1119", borderRadius: "12px", padding: "1.5rem", minHeight: "100px", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              {logoUrl
+                ? <img src={logoUrl} alt="Clinic logo" style={{ maxHeight: "80px", maxWidth: "200px", objectFit: "contain" }} />
+                : <div style={{ color: "#ffffff44", fontSize: "0.85rem" }}>No logo — showing clinic name</div>
+              }
+            </div>
+          </div>
+          <div style={{ flex: "1", minWidth: "200px" }}>
+            <div className="field-label" style={{ marginBottom: "0.5rem" }}>Upload new logo</div>
+            <input ref={logoInputRef} type="file" accept="image/*" onChange={(e) => upload(e.target.files?.[0], LOGO_PATH, setLogoUrl, "Logo")} style={{ display: "none" }} />
+            <button className="btn btn-blue" onClick={() => logoInputRef.current?.click()} disabled={uploading}>
+              {uploading ? "Uploading…" : "Choose image"}
+            </button>
+            <div className="dim" style={{ fontSize: "0.78rem", marginTop: "0.5rem" }}>PNG, JPG, SVG · max 2MB</div>
           </div>
         </div>
-        <div style={{ flex: "1", minWidth: "200px" }}>
-          <div className="field-label" style={{ marginBottom: "0.5rem" }}>Upload new logo</div>
-          <input ref={inputRef} type="file" accept="image/*" onChange={handleUpload} style={{ display: "none" }} />
-          <button className="btn btn-blue" onClick={() => inputRef.current?.click()} disabled={uploading}>
-            {uploading ? "Uploading…" : "Choose image"}
-          </button>
-          <div className="dim" style={{ fontSize: "0.78rem", marginTop: "0.5rem" }}>PNG, JPG, SVG · max 2MB</div>
-          {msg && <div style={{ fontSize: "0.82rem", marginTop: "0.75rem", color: msg.startsWith("✓") ? "var(--green)" : "var(--red)" }}>{msg}</div>}
+      </div>
+
+      <div className="card">
+        <h2 className="card-title">Closed / Opening-Hours Splash</h2>
+        <p className="dim" style={{ fontSize: "0.83rem", marginBottom: "1.5rem" }}>
+          Full-screen image shown on the TV outside opening hours. Design it with your opening hours included. A live clock and QR code overlay at the bottom automatically. Recommended: landscape, 1920×1080.
+        </p>
+        <div style={{ display: "flex", gap: "2rem", alignItems: "flex-start", flexWrap: "wrap" }}>
+          <div style={{ flex: "1", minWidth: "200px" }}>
+            <div className="field-label" style={{ marginBottom: "0.5rem" }}>Current splash</div>
+            <div style={{ background: "#0d1119", borderRadius: "12px", padding: "1rem", minHeight: "120px", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              {splashUrl
+                ? <img src={splashUrl} alt="Splash" style={{ maxHeight: "160px", maxWidth: "100%", objectFit: "contain", borderRadius: "8px" }} />
+                : <div style={{ color: "#ffffff44", fontSize: "0.85rem" }}>No splash — showing text fallback</div>
+              }
+            </div>
+          </div>
+          <div style={{ flex: "1", minWidth: "200px" }}>
+            <div className="field-label" style={{ marginBottom: "0.5rem" }}>Upload splash image</div>
+            <input ref={splashInputRef} type="file" accept="image/*" onChange={(e) => upload(e.target.files?.[0], SPLASH_PATH, setSplashUrl, "Splash")} style={{ display: "none" }} />
+            <button className="btn btn-blue" onClick={() => splashInputRef.current?.click()} disabled={uploading}>
+              {uploading ? "Uploading…" : "Choose image"}
+            </button>
+            <div className="dim" style={{ fontSize: "0.78rem", marginTop: "0.5rem" }}>PNG, JPG · max 5MB</div>
+          </div>
+        </div>
+        {msg && <div style={{ fontSize: "0.82rem", marginTop: "1rem", color: msg.startsWith("✓") ? "var(--green)" : "var(--red)" }}>{msg}</div>}
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   SCHEDULE TAB — opening hours + auto-clear time
+───────────────────────────────────────────── */
+function ScheduleTab({ state, setState }) {
+  const sched = state.schedule || DEFAULT_SCHEDULE;
+  const update = async (patch) => {
+    await setState({ ...state, schedule: { ...sched, ...patch } }, { role: "ADMIN", action: "scheduleUpdate" });
+  };
+  const open = isClinicOpen(sched);
+  return (
+    <div className="card">
+      <h2 className="card-title">Opening Hours &amp; Daily Reset</h2>
+      <p className="dim" style={{ fontSize: "0.83rem", marginBottom: "1.25rem" }}>
+        The TV shows your splash image outside opening hours and the live queue during them.
+        Status now: <strong style={{ color: open ? "var(--green)" : "var(--red)" }}>{open ? "OPEN (live queue)" : "CLOSED (splash)"}</strong>
+      </p>
+      <div className="chime-grid">
+        <label className="toggle-row">
+          <span>Enable scheduled splash</span>
+          <input type="checkbox" checked={!!sched.enabled} onChange={(e) => update({ enabled: e.target.checked })} />
+        </label>
+        <div className="field-group">
+          <label className="field-label">Opening time (splash → queue)</label>
+          <input type="time" className="field-input" style={{ width: "auto" }} value={sched.openTime || "08:00"} onChange={(e) => update({ openTime: e.target.value })} />
+        </div>
+        <div className="field-group">
+          <label className="field-label">Closing time (queue → splash)</label>
+          <input type="time" className="field-input" style={{ width: "auto" }} value={sched.closeTime || "17:00"} onChange={(e) => update({ closeTime: e.target.value })} />
+        </div>
+        <div className="field-group">
+          <label className="field-label">Daily token auto-clear time</label>
+          <input type="time" className="field-input" style={{ width: "auto" }} value={sched.clearTime || "06:00"} onChange={(e) => update({ clearTime: e.target.value })} />
+          <div className="dim" style={{ fontSize: "0.78rem", marginTop: "0.4rem" }}>Yesterday's tokens &amp; statuses reset at this time. Assignments stay.</div>
         </div>
       </div>
     </div>
@@ -1877,6 +2046,21 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 .lobby-logo-text { font-family: 'Space Grotesk', sans-serif; font-size: 1.4rem; font-weight: 700; letter-spacing: -0.02em; }
 .lobby-qr-wrap { display: flex; flex-direction: column; align-items: center; gap: 4px; }
 .lobby-qr-label { font-size: 0.6rem; opacity: 0.35; letter-spacing: 0.06em; text-transform: uppercase; }
+
+/* CLOSED SPLASH */
+.splash { position: relative; width: 100%; min-height: 100vh; background: #060810; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.splash-img { width: 100%; height: 100vh; object-fit: contain; display: block; }
+.splash-fallback { text-align: center; color: #fff; }
+.splash-logo { font-family: 'Space Grotesk', sans-serif; font-size: 2.5rem; font-weight: 700; margin-bottom: 1rem; }
+.splash-closed { font-size: 1.5rem; opacity: 0.5; text-transform: uppercase; letter-spacing: 0.2em; margin-bottom: 0.5rem; }
+.splash-hours { font-size: 1.1rem; opacity: 0.6; }
+.splash-overlay { position: absolute; bottom: 1.5rem; left: 0; right: 0; display: flex; align-items: flex-end; justify-content: space-between; padding: 0 2rem; pointer-events: none; }
+.splash-clock { font-family: 'JetBrains Mono', monospace; font-size: 1.4rem; font-weight: 500; color: #fff; opacity: 0.7; letter-spacing: 0.04em; background: #00000055; padding: 6px 12px; border-radius: 8px; }
+@media (max-width: 600px) {
+  .splash-img { height: auto; max-height: 100vh; }
+  .splash-overlay { padding: 0 1rem; bottom: 1rem; }
+  .splash-clock { font-size: 1.1rem; }
+}
 
 /* PORTALS */
 .portal-bg { min-height: calc(100vh - 48px); background: var(--bg); padding: 2rem 1rem; }
