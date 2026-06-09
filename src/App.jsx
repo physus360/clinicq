@@ -32,7 +32,8 @@ import {
   Timestamp,
   where,
 } from "firebase/firestore";
-import { db, storage, APP_URL } from "./firebase.js";
+import { db, storage, APP_URL, functions } from "./firebase.js";
+import { httpsCallable } from "firebase/functions";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { initCredentials, verifyLogin, changePassword, addRoomCredential, removeRoomCredential, fetchCredentials, onAuthChange, logout as logout_, signInWithGoogle, completeGoogleRedirect } from "./auth.js";
 
@@ -40,6 +41,7 @@ const CONFIG_DOC = doc(db, "clinicq", "config");
 const ROOMS_COL = collection(db, "clinicq_rooms");
 const AUDIT_COL = collection(db, "clinicq_audit");
 const SESSIONS_COL = collection(db, "clinicq_sessions");
+const STAFF_DOC = doc(db, "clinicq", "staff");
 
 const roomDoc = (id) => doc(db, "clinicq_rooms", id);
 
@@ -1419,9 +1421,9 @@ function DeveloperPortal() {
         </div>
 
         <div className="tab-bar">
-          {["doctors","rooms","credentials","chime","branding","schedule","analytics"].map((t) => (
+          {["doctors","rooms","import","staff","credentials","chime","branding","schedule","analytics"].map((t) => (
             <button key={t} className={`tab-btn${tab===t?" active":""}`} onClick={() => setTab(t)}>
-              {t==="doctors"?"👤 Doctors":t==="rooms"?"🏥 Rooms":t==="credentials"?"🔑 Credentials":t==="chime"?"🔔 Chime":t==="branding"?"🎨 Branding":t==="schedule"?"🕐 Schedule":"📊 Analytics"}
+              {t==="doctors"?"👤 Doctors":t==="rooms"?"🏥 Rooms":t==="import"?"📥 Import":t==="staff"?"👥 Staff":t==="credentials"?"🔑 Credentials":t==="chime"?"🔔 Chime":t==="branding"?"🎨 Branding":t==="schedule"?"🕐 Schedule":"📊 Analytics"}
             </button>
           ))}
         </div>
@@ -1504,6 +1506,8 @@ function DeveloperPortal() {
         )}
 
         {tab === "branding" && <BrandingTab />}
+        {tab === "import" && <StaffImportTab state={state} setState={setState} />}
+        {tab === "staff" && <StaffDirectoryTab />}
         {tab === "schedule" && <ScheduleTab state={state} setState={setState} />}
         {tab === "analytics" && <AnalyticsTab />}
       </div>
@@ -1512,8 +1516,314 @@ function DeveloperPortal() {
 }
 
 /* ─────────────────────────────────────────────
-   CREDENTIALS TAB — change passwords via Firestore auth doc
+   SHARED: load + role helpers for staff
 ───────────────────────────────────────────── */
+async function grantRole(person, role, staff, setStaff) {
+  const createStaffAccount = httpsCallable(functions, "createStaffAccount");
+  await createStaffAccount({ email: person.email, name: person.name, role });
+  const merged = staff.map((p) =>
+    (p.idNumber || p.name) === (person.idNumber || person.name) ? { ...p, role } : p
+  );
+  await setDoc(STAFF_DOC, { people: merged });
+  setStaff(merged);
+}
+
+async function revokeRole(person, staff, setStaff) {
+  const revoke = httpsCallable(functions, "revokeStaffAccount");
+  await revoke({ email: person.email });
+  const merged = staff.map((p) =>
+    (p.idNumber || p.name) === (person.idNumber || person.name) ? { ...p, role: null } : p
+  );
+  await setDoc(STAFF_DOC, { people: merged });
+  setStaff(merged);
+}
+
+/* ─────────────────────────────────────────────
+   STAFF IMPORT TAB — upload Excel/CSV only
+───────────────────────────────────────────── */
+function StaffImportTab({ state, setState }) {
+  const [staff, setStaff] = useState([]);
+  const [preview, setPreview] = useState(null);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const fileRef = useRef(null);
+
+  useEffect(() => {
+    getDoc(STAFF_DOC).then((snap) => setStaff(snap.exists() ? (snap.data().people || []) : [])).catch(() => {});
+  }, []);
+
+  const parseFile = async (file) => {
+    if (!file) return;
+    setMsg(""); setBusy(true);
+    try {
+      const XLSX = await import("xlsx");
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const people = [];
+      wb.SheetNames.forEach((sheetName) => {
+        const sheet = wb.Sheets[sheetName];
+        const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+        const isDoctorSheet = /doctor/i.test(sheetName);
+        rows.forEach((r) => {
+          const get = (...keys) => {
+            for (const want of keys) {
+              for (const k of Object.keys(r)) {
+                if (k.trim().toLowerCase().includes(want)) {
+                  const v = String(r[k]).trim();
+                  if (v) return v;
+                }
+              }
+            }
+            return "";
+          };
+          const name = get("name");
+          if (!name) return;
+          const designation = get("speciality", "designation", "user type") || (isDoctorSheet ? "Doctor" : "Staff");
+          people.push({
+            name: name.replace(/\s+/g, " ").trim(),
+            idNumber: get("id no", "passport", "id"),
+            registrationNo: get("registration", "service no"),
+            designation,
+            email: get("email"),
+            contact: get("contact"),
+            category: isDoctorSheet || /doctor|practitioner|surgeon|physician/i.test(designation) ? "doctor" : "staff",
+          });
+        });
+      });
+      const seen = new Set();
+      const deduped = people.filter((p) => {
+        const key = (p.idNumber || p.name).toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      if (deduped.length === 0) setMsg("No valid rows found. Make sure the file has a 'Name' column.");
+      else setPreview(deduped);
+    } catch (e) {
+      setMsg("Could not read file: " + e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmImport = async () => {
+    if (!preview) return;
+    setBusy(true); setMsg("");
+    try {
+      const byKey = {};
+      [...staff, ...preview].forEach((p) => {
+        const k = (p.idNumber || p.name).toLowerCase();
+        byKey[k] = { ...byKey[k], ...p, role: (staff.find((s) => (s.idNumber || s.name).toLowerCase() === k)?.role) || p.role || null };
+      });
+      const merged = Object.values(byKey);
+      await setDoc(STAFF_DOC, { people: merged });
+      setStaff(merged);
+
+      const doctors = merged.filter((p) => p.category === "doctor");
+      const dir = { ...(state.doctorDirectory || {}) };
+      doctors.forEach((d) => {
+        const existing = Object.values(dir).find((x) => x.name === d.name);
+        if (existing) {
+          existing.specialty = d.designation;
+          existing.idNumber = d.idNumber;
+          existing.registrationNo = d.registrationNo;
+        } else {
+          const id = `doc_${Math.random().toString(36).slice(2, 9)}`;
+          dir[id] = { id, name: d.name, specialty: d.designation, idNumber: d.idNumber, registrationNo: d.registrationNo, active: true };
+        }
+      });
+      await setState({ ...state, doctorDirectory: dir }, { role: "DEVELOPER", action: "staffImport", count: preview.length });
+      setMsg(`\u2713 Imported ${preview.length} people (${doctors.length} doctors added to assignment directory). Manage roles in the Staff tab.`);
+      setPreview(null);
+    } catch (e) {
+      setMsg("Import failed: " + e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+      <div className="card">
+        <h2 className="card-title">Import Staff &amp; Doctors</h2>
+        <p className="dim" style={{ fontSize: "0.83rem", marginBottom: "1rem" }}>
+          Upload an Excel (.xlsx) or CSV file. Sheets named with "Doctor" are tagged as doctors and added to the room-assignment directory. After importing, grant login roles in the <strong>Staff</strong> tab.
+        </p>
+        <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }}
+          onChange={(e) => parseFile(e.target.files?.[0])} />
+        <button className="btn btn-blue" onClick={() => fileRef.current?.click()} disabled={busy}>
+          {busy ? "Reading\u2026" : "Choose file"}
+        </button>
+        {msg && <div style={{ fontSize: "0.83rem", marginTop: "0.75rem", color: msg.startsWith("\u2713") ? "var(--green)" : "var(--red)" }}>{msg}</div>}
+      </div>
+
+      {preview && (
+        <div className="card" style={{ borderColor: "var(--blue)" }}>
+          <h2 className="card-title">Preview \u2014 {preview.length} people found</h2>
+          <div className="table-wrap" style={{ maxHeight: "300px", overflowY: "auto" }}>
+            <table className="data-table">
+              <thead><tr><th>Name</th><th>ID</th><th>Designation</th><th>Type</th></tr></thead>
+              <tbody>
+                {preview.map((p, i) => (
+                  <tr key={i}>
+                    <td>{p.name}</td>
+                    <td className="mono" style={{ fontSize: "0.8rem" }}>{p.idNumber || "\u2014"}</td>
+                    <td>{p.designation}</td>
+                    <td><span className="status-pill" style={{ background: p.category === "doctor" ? "#2563eb22" : "#64748b22", color: p.category === "doctor" ? "#2563eb" : "#64748b" }}>{p.category}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem" }}>
+            <button className="btn btn-green" onClick={confirmImport} disabled={busy}>{busy ? "Importing\u2026" : `Import ${preview.length} people`}</button>
+            <button className="btn btn-outline" onClick={() => setPreview(null)} disabled={busy}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   STAFF DIRECTORY TAB — search, filter, manage roles
+───────────────────────────────────────────── */
+function StaffDirectoryTab() {
+  const [staff, setStaff] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("all"); // all | doctor | staff | login | nologin
+  const [msg, setMsg] = useState("");
+  const [roleBusy, setRoleBusy] = useState(null);
+
+  useEffect(() => {
+    getDoc(STAFF_DOC).then((snap) => {
+      setStaff(snap.exists() ? (snap.data().people || []) : []);
+      setLoading(false);
+    }).catch(() => setLoading(false));
+  }, []);
+
+  const assign = async (person, role) => {
+    if (!person.email) { setMsg(`\u2715 ${person.name} has no email \u2014 cannot create a login.`); return; }
+    setRoleBusy(person.email); setMsg("");
+    try {
+      await grantRole(person, role, staff, setStaff);
+      setMsg(`\u2713 ${person.name} is now ${role}. A password-setup email was sent to ${person.email}.`);
+    } catch (e) {
+      setMsg(`\u2715 Could not assign role: ${e.message}`);
+    } finally { setRoleBusy(null); }
+  };
+
+  const revoke = async (person) => {
+    if (!window.confirm(`Revoke ${person.name}'s login access?`)) return;
+    setRoleBusy(person.email); setMsg("");
+    try {
+      await revokeRole(person, staff, setStaff);
+      setMsg(`\u2713 ${person.name}'s access revoked.`);
+    } catch (e) {
+      setMsg(`\u2715 Could not revoke: ${e.message}`);
+    } finally { setRoleBusy(null); }
+  };
+
+  const removePerson = async (person) => {
+    if (!window.confirm(`Remove ${person.name} from the directory? (Does not delete their login if they have one.)`)) return;
+    const merged = staff.filter((p) => (p.idNumber || p.name) !== (person.idNumber || person.name));
+    await setDoc(STAFF_DOC, { people: merged });
+    setStaff(merged);
+  };
+
+  const roleOptions = (person) =>
+    person.category === "doctor"
+      ? ["DOCTOR", "ADMIN", "SUPERADMIN"]
+      : ["RECEPTIONIST", "ADMIN", "SUPERADMIN", "DOCTOR"];
+
+  // Summary
+  const total = staff.length;
+  const docCount = staff.filter((p) => p.category === "doctor").length;
+  const loginCount = staff.filter((p) => p.role).length;
+  const recCount = staff.filter((p) => p.role === "RECEPTIONIST").length;
+
+  // Apply search + filter
+  const q = search.trim().toLowerCase();
+  const filtered = staff.filter((p) => {
+    if (q && !(`${p.name} ${p.designation} ${p.email} ${p.idNumber}`.toLowerCase().includes(q))) return false;
+    if (filter === "doctor") return p.category === "doctor";
+    if (filter === "staff") return p.category !== "doctor";
+    if (filter === "login") return !!p.role;
+    if (filter === "nologin") return !p.role;
+    return true;
+  });
+
+  if (loading) return <div className="card dim">Loading directory\u2026</div>;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+      {/* Summary strip */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: "0.75rem" }}>
+        {[
+          { label: "Total people", value: total },
+          { label: "Doctors", value: docCount },
+          { label: "With login", value: loginCount },
+          { label: "Receptionists", value: recCount },
+        ].map((m) => (
+          <div key={m.label} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "10px", padding: "0.9rem 1rem" }}>
+            <div style={{ fontSize: "0.72rem", color: "var(--text-dim)", marginBottom: "0.3rem" }}>{m.label}</div>
+            <div style={{ fontSize: "1.5rem", fontWeight: 600, fontFamily: "'Space Grotesk', sans-serif" }}>{m.value}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="card">
+        {/* Search + filters */}
+        <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", marginBottom: "1rem", alignItems: "center" }}>
+          <input className="field-input" placeholder="Search name, speciality, email\u2026" value={search} onChange={(e) => setSearch(e.target.value)} style={{ flex: 1, minWidth: "200px" }} />
+          <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
+            {[["all","All"],["doctor","Doctors"],["staff","Staff"],["login","Has login"],["nologin","No login"]].map(([k, label]) => (
+              <button key={k} className={`tab-btn${filter === k ? " active" : ""}`} style={{ padding: "0.35rem 0.7rem", fontSize: "0.8rem" }} onClick={() => setFilter(k)}>{label}</button>
+            ))}
+          </div>
+        </div>
+
+        {msg && <div style={{ fontSize: "0.83rem", marginBottom: "0.75rem", color: msg.startsWith("\u2713") ? "var(--green)" : "var(--red)" }}>{msg}</div>}
+
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead><tr><th>Name</th><th>Designation</th><th>ID / Reg</th><th>Email</th><th>Login</th><th>Manage</th></tr></thead>
+            <tbody>
+              {filtered.length === 0 ? (
+                <tr><td colSpan={6} className="dim" style={{ textAlign: "center", padding: "1.5rem" }}>No matching people.</td></tr>
+              ) : filtered.map((p, i) => (
+                <tr key={i}>
+                  <td style={{ fontWeight: 500 }}>{p.name}</td>
+                  <td>{p.designation}</td>
+                  <td className="mono" style={{ fontSize: "0.75rem" }}>{p.idNumber || "\u2014"}{p.registrationNo ? ` / ${p.registrationNo}` : ""}</td>
+                  <td className="dim" style={{ fontSize: "0.8rem" }}>{p.email || "\u2014"}</td>
+                  <td>{p.role
+                    ? <span className="status-pill" style={{ background: "#16a34a22", color: "#16a34a" }}>{p.role}</span>
+                    : <span className="dim" style={{ fontSize: "0.8rem" }}>None</span>}</td>
+                  <td>
+                    <div style={{ display: "flex", gap: "0.3rem", alignItems: "center" }}>
+                      <select className="field-input" style={{ width: "auto", padding: "0.25rem 0.5rem", fontSize: "0.8rem" }}
+                        value={p.role || ""} disabled={roleBusy === p.email}
+                        onChange={(e) => e.target.value && assign(p, e.target.value)}>
+                        <option value="">{roleBusy === p.email ? "Working\u2026" : "Grant role\u2026"}</option>
+                        {roleOptions(p).map((r) => <option key={r} value={r}>{r}</option>)}
+                      </select>
+                      {p.role && <button className="btn btn-red btn-sm" disabled={roleBusy === p.email} onClick={() => revoke(p)}>Revoke</button>}
+                      <button className="btn btn-outline btn-sm" onClick={() => removePerson(p)} title="Remove from directory">\u2715</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 /* ─────────────────────────────────────────────
    BRANDING TAB — logo upload for lobby display
 ───────────────────────────────────────────── */

@@ -2,8 +2,9 @@ import { initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
 import { getAuth, GoogleAuthProvider } from "firebase/auth";
 import { getStorage } from "firebase/storage";
+import { getFunctions } from "firebase/functions";
 
-const firebaseConfig = {
+export const firebaseConfig = {
   apiKey:            import.meta.env.VITE_FIREBASE_API_KEY,
   authDomain:        import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
   projectId:         import.meta.env.VITE_FIREBASE_PROJECT_ID,
@@ -16,6 +17,7 @@ const firebaseApp = initializeApp(firebaseConfig);
 export const db = getFirestore(firebaseApp);
 export const auth = getAuth(firebaseApp);
 export const storage = getStorage(firebaseApp);
+export const functions = getFunctions(firebaseApp, "us-central1");
 export const googleProvider = new GoogleAuthProvider();
 export const DEVELOPER_EMAIL = import.meta.env.VITE_DEVELOPER_EMAIL || "";
 export const APP_URL = import.meta.env.VITE_APP_URL || window.location.origin;

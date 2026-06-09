@@ -54,15 +54,33 @@ export function emailToRole(email) {
 
 /* ─────────────────────────────────────────────
    AUTH STATE OBSERVER
+   Prefers the custom-claim role (set by Cloud Function for
+   personal staff accounts); falls back to the email pattern
+   for the legacy room/system accounts and the developer.
 ───────────────────────────────────────────── */
 export function onAuthChange(callback) {
-  return onAuthStateChanged(auth, (user) => {
-    if (user) {
-      const { role, room } = emailToRole(user.email);
-      callback({ user, role, room });
-    } else {
+  return onAuthStateChanged(auth, async (user) => {
+    if (!user) {
       callback({ user: null, role: null, room: null });
+      return;
     }
+    // Developer is always recognized by email
+    if (DEVELOPER_EMAIL && user.email === DEVELOPER_EMAIL) {
+      callback({ user, role: "DEVELOPER", room: null });
+      return;
+    }
+    // Personal staff accounts carry their role as a custom claim
+    try {
+      const token = await user.getIdTokenResult();
+      const claimRole = token.claims?.role || null;
+      if (claimRole) {
+        callback({ user, role: claimRole, room: null });
+        return;
+      }
+    } catch {}
+    // Fallback: legacy email-pattern accounts (room logins, etc.)
+    const { role, room } = emailToRole(user.email);
+    callback({ user, role, room });
   });
 }
 
