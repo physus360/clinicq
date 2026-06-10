@@ -42,13 +42,15 @@ const ROOMS_COL = collection(db, "clinicq_rooms");
 const AUDIT_COL = collection(db, "clinicq_audit");
 const SESSIONS_COL = collection(db, "clinicq_sessions");
 const STAFF_DOC = doc(db, "clinicq", "staff");
+const PATIENTS_COL = collection(db, "clinicq_patients");
+const VISITS_COL = collection(db, "clinicq_visits");
 
 const roomDoc = (id) => doc(db, "clinicq_rooms", id);
 
 // Per-room operational fields (live in clinicq_rooms/{id})
 const ROOM_FIELDS = ["assigned", "sessions", "nowServing", "upNext", "customCall", "status"];
 // Config fields (live in clinicq/config)
-const CONFIG_FIELDS = ["rooms", "doctorDirectory", "chime", "schedule"];
+const CONFIG_FIELDS = ["rooms", "doctorDirectory", "chime", "schedule", "adminEmails"];
 
 /* ─────────────────────────────────────────────
    CONSTANTS
@@ -76,6 +78,7 @@ const DEFAULT_STATE = {
   customCall: {},     // roomId → string | null
   status: {},         // roomId → "IDLE"|"SESSION STARTED"|"CALLING"|"PAUSED"|"RECALL"|"SESSION ENDED"
   doctorDirectory: {},// id → { id, name, specialty, active }
+  adminEmails: [],    // Google emails that get ADMIN role
   schedule: DEFAULT_SCHEDULE,
   chime: {
     enabled: true,
@@ -173,7 +176,7 @@ function useChime(settings) {
    merges into the same in-memory shape the portals expect.
 ───────────────────────────────────────────── */
 function useClinicState() {
-  const [config, setConfig] = useState({ rooms: DEFAULT_ROOMS, doctorDirectory: {}, chime: DEFAULT_STATE.chime, schedule: DEFAULT_SCHEDULE });
+  const [config, setConfig] = useState({ rooms: DEFAULT_ROOMS, doctorDirectory: {}, chime: DEFAULT_STATE.chime, schedule: DEFAULT_SCHEDULE, adminEmails: [] });
   const [roomsData, setRoomsData] = useState({}); // roomId → { assigned, sessions, ... }
   const [ready, setReady] = useState(false);
   const [online, setOnline] = useState(true);
@@ -210,6 +213,7 @@ function useClinicState() {
         doctorDirectory: data.doctorDirectory || {},
         chime: { ...DEFAULT_STATE.chime, ...(data.chime || {}) },
         schedule: { ...DEFAULT_SCHEDULE, ...(data.schedule || {}) },
+        adminEmails: data.adminEmails || [],
       });
       setReady(true);
     }, () => setOnline(false));
@@ -234,6 +238,7 @@ function useClinicState() {
       doctorDirectory: config.doctorDirectory || {},
       chime: config.chime,
       schedule: config.schedule,
+      adminEmails: config.adminEmails || [],
       assigned: {}, sessions: {}, nowServing: {}, upNext: {}, customCall: {}, status: {},
     };
     rooms.forEach((id) => {
@@ -258,7 +263,7 @@ function useClinicState() {
       JSON.stringify(next[f]) !== JSON.stringify(cur.config[f])
     );
     if (configChanged) {
-      await pushConfig({ rooms: next.rooms, doctorDirectory: next.doctorDirectory, chime: next.chime, schedule: next.schedule });
+      await pushConfig({ rooms: next.rooms, doctorDirectory: next.doctorDirectory, chime: next.chime, schedule: next.schedule, adminEmails: next.adminEmails || [] });
     }
 
     // Detect per-room changes and write only those rooms
@@ -351,19 +356,27 @@ export default function ClinicQ() {
   // Redirect to login if trying to access protected page while not authenticated
   useEffect(() => {
     if (loading) return;
-    const protected_ = ["doctor", "admin", "superadmin", "developer"];
-    if (protected_.includes(page) && !role) { navigate("login"); }
-    if (page === "doctor"     && role && role !== "DOCTOR")     { navigate("login"); }
-    if (page === "admin"      && role && role !== "ADMIN")      { navigate("login"); }
-    if (page === "superadmin" && role && role !== "SUPERADMIN") { navigate("login"); }
-    if (page === "developer"  && role && role !== "DEVELOPER")  { navigate("login"); }
+    const protected_ = ["doctor", "admin", "reception", "developer"];
+    // Unauthenticated → send to correct login page
+    if (protected_.includes(page) && !role) {
+      navigate(page === "admin" || page === "developer" ? "adminlogin" : "login");
+      return;
+    }
+    if (page === "doctor"    && role && role !== "DOCTOR")       { navigate("login"); }
+    if (page === "reception" && role && role !== "RECEPTIONIST") { navigate("login"); }
+    if (page === "admin"     && role && role !== "ADMIN")        { navigate("adminlogin"); }
+    if (page === "developer" && role && role !== "DEVELOPER")    { navigate("adminlogin"); }
   }, [page, role, loading]);
 
   // After login, redirect to the right portal
   useEffect(() => {
     if (loading || !role) return;
-    if (page === "login") {
-      navigate(role === "DEVELOPER" ? "developer" : role === "SUPERADMIN" ? "superadmin" : role === "ADMIN" ? "admin" : "doctor");
+    if (page === "login" || page === "adminlogin") {
+      navigate(
+        role === "DEVELOPER" ? "developer" :
+        role === "ADMIN"     ? "admin" :
+        role === "RECEPTIONIST" ? "reception" : "doctor"
+      );
     }
   }, [role, loading]);
 
@@ -396,7 +409,7 @@ export default function ClinicQ() {
     </>
   );
 
-  const showNav = page !== "lobby";
+  const showNav = page !== "lobby" && page !== "login" && page !== "adminlogin";
 
   return (
     <>
@@ -405,10 +418,11 @@ export default function ClinicQ() {
       <div className={showNav ? "page-wrap" : ""}>
         {page === "lobby"      && <Lobby />}
         {page === "login"      && <LoginPage navigate={navigate} />}
-        {page === "doctor"     && role === "DOCTOR"     && <DoctorPortal room={room} />}
-        {page === "admin"      && role === "ADMIN"      && <AdminPortal />}
-        {page === "superadmin" && role === "SUPERADMIN" && <SuperAdminPortal />}
-        {page === "developer"  && role === "DEVELOPER"  && <DeveloperPortal />}
+        {page === "adminlogin" && <AdminLoginPage navigate={navigate} />}
+        {page === "doctor"     && role === "DOCTOR"      && <DoctorPortal room={room} />}
+        {page === "admin"      && role === "ADMIN"       && <AdminPortal />}
+        {page === "reception"  && role === "RECEPTIONIST" && <ReceptionPortal />}
+        {page === "developer"  && role === "DEVELOPER"   && <DeveloperPortal />}
       </div>
     </>
   );
@@ -429,7 +443,7 @@ function TopNav({ navigate, role, room }) {
       <div className="topnav-links">
         {role === "DOCTOR" && <a onClick={() => navigate("doctor")}>Doctor {room ? `· ${room}` : ""}</a>}
         {role === "ADMIN" && <a onClick={() => navigate("admin")}>Admin</a>}
-        {role === "SUPERADMIN" && <a onClick={() => navigate("superadmin")}>Super-Admin</a>}
+        {role === "RECEPTIONIST" && <a onClick={() => navigate("reception")}>Reception</a>}
         {role === "DEVELOPER" && <a onClick={() => navigate("developer")}>Developer</a>}
         {!role && <a onClick={() => navigate("login")}>Sign in</a>}
         {role && <a className="logout" onClick={logout}>Logout</a>}
@@ -702,6 +716,10 @@ function Lobby() {
 /* ─────────────────────────────────────────────
    LOGIN — credentials verified against Firestore
 ───────────────────────────────────────────── */
+/* ─────────────────────────────────────────────
+   LOGIN — Staff (Doctor + Reception only)
+   URL: /#login
+───────────────────────────────────────────── */
 function LoginPage({ navigate }) {
   const { state } = useClinicState();
   const [role, setRole] = useState("DOCTOR");
@@ -711,20 +729,12 @@ function LoginPage({ navigate }) {
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
 
-  // Note: first-run seeding happens after Developer Google sign-in (see App root),
-  // since locked Firestore rules require authentication to write credentials.
-
   const submit = async () => {
     if (loading) return;
-    setErr("");
-    setLoading(true);
+    setErr(""); setLoading(true);
     try {
       const result = await verifyLogin(role, user, pass, role === "DOCTOR" ? room : null);
-      if (result.success) {
-        // Firebase Auth state change will trigger redirect via useEffect in App root
-      } else {
-        setErr(result.error);
-      }
+      if (!result.success) setErr(result.error);
     } catch (e) {
       setErr(e.message || "Login failed. Please try again.");
     } finally {
@@ -735,15 +745,17 @@ function LoginPage({ navigate }) {
   return (
     <div className="portal-bg">
       <div className="login-card">
-        <div className="login-logo"><span className="lobby-pulse" style={{ width: 10, height: 10 }} />ClinicQ</div>
-        <h2 className="login-title">Sign in</h2>
+        <div className="login-logo">
+          <span className="lobby-pulse" style={{ width: 10, height: 10 }} />
+          {CLINIC_NAME}
+        </div>
+        <h2 className="login-title">Staff Sign in</h2>
 
         <div className="field-group">
           <label className="field-label">Role</label>
           <select className="field-input" value={role} onChange={(e) => { setRole(e.target.value); setErr(""); }}>
             <option value="DOCTOR">Doctor</option>
-            <option value="ADMIN">Admin</option>
-            <option value="SUPERADMIN">Super-Admin</option>
+            <option value="RECEPTIONIST">Reception</option>
           </select>
         </div>
 
@@ -773,21 +785,56 @@ function LoginPage({ navigate }) {
         <button className="btn btn-primary w-full" onClick={submit} disabled={loading}>
           {loading ? "Signing in…" : "Sign in"}
         </button>
+      </div>
+    </div>
+  );
+}
 
-        <div className="login-divider"><span>or</span></div>
+/* ─────────────────────────────────────────────
+   ADMIN LOGIN — Developer + Admin (Google only)
+   URL: /#admin
+───────────────────────────────────────────── */
+function AdminLoginPage() {
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
 
-        <button className="btn btn-google w-full" onClick={async () => {
-          setErr(""); setLoading(true);
-          try {
-            const r = await signInWithGoogle();
-            if (!r.success) setErr(r.error);
-          } catch (e) { setErr(e.message); }
-          finally { setLoading(false); }
-        }} disabled={loading}>
-          <svg width="18" height="18" viewBox="0 0 18 18" style={{marginRight:"8px"}}><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/></svg>
-          Sign in with Google
+  const handleGoogleSignIn = async () => {
+    setErr(""); setLoading(true);
+    try {
+      const r = await signInWithGoogle();
+      if (r?.redirecting) return; // redirect flow in progress
+      if (!r?.success) setErr(r?.error || "Access denied. Your account is not authorised.");
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="portal-bg">
+      <div className="login-card">
+        <div className="login-logo">
+          <span className="lobby-pulse" style={{ width: 10, height: 10 }} />
+          {CLINIC_NAME}
+        </div>
+        <h2 className="login-title">Admin Sign in</h2>
+        <p className="dim" style={{ fontSize: "0.85rem", marginBottom: "1.25rem" }}>
+          Sign in with your authorised Google account to access the admin portal.
+        </p>
+        {err && <div className="login-err">{err}</div>}
+        <button className="btn btn-google w-full" onClick={handleGoogleSignIn} disabled={loading}>
+          <svg width="18" height="18" viewBox="0 0 18 18" style={{ marginRight: "8px" }}>
+            <path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z"/>
+            <path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/>
+            <path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/>
+            <path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/>
+          </svg>
+          {loading ? "Signing in…" : "Sign in with Google"}
         </button>
-        <div className="dim" style={{fontSize:"0.75rem",textAlign:"center",marginTop:"0.5rem"}}>Developer access only</div>
+        <div className="dim" style={{ fontSize: "0.75rem", textAlign: "center", marginTop: "0.75rem" }}>
+          Access restricted to authorised accounts only.
+        </div>
       </div>
     </div>
   );
@@ -1041,9 +1088,9 @@ function AdminPortal() {
         </div>
 
         <div className="tab-bar">
-          {["rooms", "analytics", "audit"].map((t) => (
+          {["rooms", "patients", "analytics", "audit"].map((t) => (
             <button key={t} className={`tab-btn${tab === t ? " active" : ""}`} onClick={() => setTab(t)}>
-              {t === "rooms" ? "🏥 Rooms" : t === "analytics" ? "📊 Analytics" : "📋 Audit Log"}
+              {t === "rooms" ? "🏥 Rooms" : t === "patients" ? "🧑‍🤝‍🧑 Patients" : t === "analytics" ? "📊 Analytics" : "📋 Audit Log"}
             </button>
           ))}
         </div>
@@ -1120,6 +1167,7 @@ function AdminPortal() {
           </div>
         )}
 
+        {tab === "patients" && <PatientRegistration state={state} />}
         {tab === "analytics" && <AnalyticsTab />}
       </div>
     </div>
@@ -1238,9 +1286,9 @@ function SuperAdminPortal() {
         </div>
 
         <div className="tab-bar">
-          {["doctors", "rooms", "credentials", "chime", "branding", "schedule"].map((t) => (
+          {["doctors", "rooms", "credentials", "chime", "branding", "schedule", "patients"].map((t) => (
             <button key={t} className={`tab-btn${tab === t ? " active" : ""}`} onClick={() => setTab(t)}>
-              {t === "doctors" ? "👤 Doctors" : t === "rooms" ? "🏥 Rooms" : t === "credentials" ? "🔑 Credentials" : t === "chime" ? "🔔 Chime" : t === "branding" ? "🎨 Branding" : "🕐 Schedule"}
+              {t === "doctors" ? "👤 Doctors" : t === "rooms" ? "🏥 Rooms" : t === "credentials" ? "🔑 Credentials" : t === "chime" ? "🔔 Chime" : t === "branding" ? "🎨 Branding" : t === "schedule" ? "🕐 Schedule" : "📥 Patients"}
             </button>
           ))}
         </div>
@@ -1334,6 +1382,7 @@ function SuperAdminPortal() {
 
         {tab === "branding" && <BrandingTab />}
         {tab === "schedule" && <ScheduleTab state={state} setState={setState} />}
+        {tab === "patients" && <PatientImportTab />}
       </div>
     </div>
   );
@@ -1421,9 +1470,9 @@ function DeveloperPortal() {
         </div>
 
         <div className="tab-bar">
-          {["doctors","rooms","import","staff","credentials","chime","branding","schedule","analytics"].map((t) => (
+          {["doctors","rooms","import","staff","patients","admins","credentials","chime","branding","schedule","analytics"].map((t) => (
             <button key={t} className={`tab-btn${tab===t?" active":""}`} onClick={() => setTab(t)}>
-              {t==="doctors"?"👤 Doctors":t==="rooms"?"🏥 Rooms":t==="import"?"📥 Import":t==="staff"?"👥 Staff":t==="credentials"?"🔑 Credentials":t==="chime"?"🔔 Chime":t==="branding"?"🎨 Branding":t==="schedule"?"🕐 Schedule":"📊 Analytics"}
+              {t==="doctors"?"👤 Doctors":t==="rooms"?"🏥 Rooms":t==="import"?"📥 Import":t==="staff"?"👥 Staff":t==="patients"?"🏥 Patients":t==="admins"?"🔐 Admins":t==="credentials"?"🔑 Credentials":t==="chime"?"🔔 Chime":t==="branding"?"🎨 Branding":t==="schedule"?"🕐 Schedule":"📊 Analytics"}
             </button>
           ))}
         </div>
@@ -1508,6 +1557,8 @@ function DeveloperPortal() {
         {tab === "branding" && <BrandingTab />}
         {tab === "import" && <StaffImportTab state={state} setState={setState} />}
         {tab === "staff" && <StaffDirectoryTab />}
+        {tab === "patients" && <PatientImportTab />}
+        {tab === "admins" && <AdminEmailsTab state={state} setState={setState} />}
         {tab === "schedule" && <ScheduleTab state={state} setState={setState} />}
         {tab === "analytics" && <AnalyticsTab />}
       </div>
@@ -1633,7 +1684,7 @@ function StaffImportTab({ state, setState }) {
         }
       });
       await setState({ ...state, doctorDirectory: dir }, { role: "DEVELOPER", action: "staffImport", count: preview.length });
-      setMsg(`\u2713 Imported ${preview.length} people (${doctors.length} doctors added to assignment directory). Manage roles in the Staff tab.`);
+      setMsg(`✓ Imported ${preview.length} people (${doctors.length} doctors added to assignment directory). Manage roles in the Staff tab.`);
       setPreview(null);
     } catch (e) {
       setMsg("Import failed: " + e.message);
@@ -1652,14 +1703,14 @@ function StaffImportTab({ state, setState }) {
         <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }}
           onChange={(e) => parseFile(e.target.files?.[0])} />
         <button className="btn btn-blue" onClick={() => fileRef.current?.click()} disabled={busy}>
-          {busy ? "Reading\u2026" : "Choose file"}
+          {busy ? "Reading…" : "Choose file"}
         </button>
-        {msg && <div style={{ fontSize: "0.83rem", marginTop: "0.75rem", color: msg.startsWith("\u2713") ? "var(--green)" : "var(--red)" }}>{msg}</div>}
+        {msg && <div style={{ fontSize: "0.83rem", marginTop: "0.75rem", color: msg.startsWith("✓") ? "var(--green)" : "var(--red)" }}>{msg}</div>}
       </div>
 
       {preview && (
         <div className="card" style={{ borderColor: "var(--blue)" }}>
-          <h2 className="card-title">Preview \u2014 {preview.length} people found</h2>
+          <h2 className="card-title">Preview — {preview.length} people found</h2>
           <div className="table-wrap" style={{ maxHeight: "300px", overflowY: "auto" }}>
             <table className="data-table">
               <thead><tr><th>Name</th><th>ID</th><th>Designation</th><th>Type</th></tr></thead>
@@ -1667,7 +1718,7 @@ function StaffImportTab({ state, setState }) {
                 {preview.map((p, i) => (
                   <tr key={i}>
                     <td>{p.name}</td>
-                    <td className="mono" style={{ fontSize: "0.8rem" }}>{p.idNumber || "\u2014"}</td>
+                    <td className="mono" style={{ fontSize: "0.8rem" }}>{p.idNumber || "—"}</td>
                     <td>{p.designation}</td>
                     <td><span className="status-pill" style={{ background: p.category === "doctor" ? "#2563eb22" : "#64748b22", color: p.category === "doctor" ? "#2563eb" : "#64748b" }}>{p.category}</span></td>
                   </tr>
@@ -1676,7 +1727,7 @@ function StaffImportTab({ state, setState }) {
             </table>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem" }}>
-            <button className="btn btn-green" onClick={confirmImport} disabled={busy}>{busy ? "Importing\u2026" : `Import ${preview.length} people`}</button>
+            <button className="btn btn-green" onClick={confirmImport} disabled={busy}>{busy ? "Importing…" : `Import ${preview.length} people`}</button>
             <button className="btn btn-outline" onClick={() => setPreview(null)} disabled={busy}>Cancel</button>
           </div>
         </div>
@@ -1695,6 +1746,8 @@ function StaffDirectoryTab() {
   const [filter, setFilter] = useState("all"); // all | doctor | staff | login | nologin
   const [msg, setMsg] = useState("");
   const [roleBusy, setRoleBusy] = useState(null);
+  const [editing, setEditing] = useState(null); // person being added/edited (form state)
+  const [isNew, setIsNew] = useState(false);
 
   useEffect(() => {
     getDoc(STAFF_DOC).then((snap) => {
@@ -1703,14 +1756,63 @@ function StaffDirectoryTab() {
     }).catch(() => setLoading(false));
   }, []);
 
+  const blankPerson = () => ({ name: "", idNumber: "", registrationNo: "", designation: "", email: "", contact: "", category: "staff", role: null });
+
+  const openAdd = () => { setEditing(blankPerson()); setIsNew(true); setMsg(""); };
+  const openEdit = (person) => { setEditing({ ...person }); setIsNew(false); setMsg(""); };
+  const closeForm = () => { setEditing(null); setIsNew(false); };
+
+  const personKey = (p) => (p.idNumber || p.name).toLowerCase();
+
+  const saveForm = async () => {
+    const p = editing;
+    if (!p.name.trim()) { setMsg("✕ Name is required."); return; }
+    const cleaned = {
+      ...p,
+      name: p.name.replace(/\s+/g, " ").trim(),
+      idNumber: p.idNumber.trim(),
+      registrationNo: (p.registrationNo || "").trim(),
+      designation: (p.designation || "").trim() || (p.category === "doctor" ? "Doctor" : "Staff"),
+      email: (p.email || "").trim(),
+      contact: (p.contact || "").trim(),
+    };
+    let merged;
+    if (isNew) {
+      // Prevent duplicate key
+      if (staff.some((s) => personKey(s) === personKey(cleaned))) {
+        setMsg("✕ A person with that ID/name already exists.");
+        return;
+      }
+      merged = [...staff, cleaned];
+    } else {
+      // Replace by original key (editing may change fields)
+      const origKey = personKey(staff.find((s) => s === staff.find((x) => personKey(x) === personKey(p))) || p);
+      merged = staff.map((s) => (personKey(s) === origKey ? cleaned : s));
+    }
+    await setDoc(STAFF_DOC, { people: merged });
+    setStaff(merged);
+    setMsg(`✓ ${isNew ? "Added" : "Updated"} ${cleaned.name}.`);
+    closeForm();
+  };
+
   const assign = async (person, role) => {
-    if (!person.email) { setMsg(`\u2715 ${person.name} has no email \u2014 cannot create a login.`); return; }
+    if (!person.email) { setMsg(`✕ ${person.name} has no email — cannot create a login.`); return; }
     setRoleBusy(person.email); setMsg("");
     try {
       await grantRole(person, role, staff, setStaff);
-      setMsg(`\u2713 ${person.name} is now ${role}. A password-setup email was sent to ${person.email}.`);
+      // Send the password-setup email via Firebase's built-in service
+      try {
+        const { sendPasswordResetEmail } = await import("firebase/auth");
+        const { auth } = await import("./firebase.js");
+        await sendPasswordResetEmail(auth, person.email);
+      } catch (mailErr) {
+        setMsg(`✓ ${person.name} is now ${role}, but the setup email failed: ${mailErr.message}. They can use "Forgot password" on the login page.`);
+        setRoleBusy(null);
+        return;
+      }
+      setMsg(`✓ ${person.name} is now ${role}. A password-setup email was sent to ${person.email}.`);
     } catch (e) {
-      setMsg(`\u2715 Could not assign role: ${e.message}`);
+      setMsg(`✕ Could not assign role: ${e.message}`);
     } finally { setRoleBusy(null); }
   };
 
@@ -1719,9 +1821,9 @@ function StaffDirectoryTab() {
     setRoleBusy(person.email); setMsg("");
     try {
       await revokeRole(person, staff, setStaff);
-      setMsg(`\u2713 ${person.name}'s access revoked.`);
+      setMsg(`✓ ${person.name}'s access revoked.`);
     } catch (e) {
-      setMsg(`\u2715 Could not revoke: ${e.message}`);
+      setMsg(`✕ Could not revoke: ${e.message}`);
     } finally { setRoleBusy(null); }
   };
 
@@ -1754,7 +1856,7 @@ function StaffDirectoryTab() {
     return true;
   });
 
-  if (loading) return <div className="card dim">Loading directory\u2026</div>;
+  if (loading) return <div className="card dim">Loading directory…</div>;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
@@ -1776,15 +1878,16 @@ function StaffDirectoryTab() {
       <div className="card">
         {/* Search + filters */}
         <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", marginBottom: "1rem", alignItems: "center" }}>
-          <input className="field-input" placeholder="Search name, speciality, email\u2026" value={search} onChange={(e) => setSearch(e.target.value)} style={{ flex: 1, minWidth: "200px" }} />
+          <input className="field-input" placeholder="Search name, speciality, email…" value={search} onChange={(e) => setSearch(e.target.value)} style={{ flex: 1, minWidth: "200px" }} />
           <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
             {[["all","All"],["doctor","Doctors"],["staff","Staff"],["login","Has login"],["nologin","No login"]].map(([k, label]) => (
               <button key={k} className={`tab-btn${filter === k ? " active" : ""}`} style={{ padding: "0.35rem 0.7rem", fontSize: "0.8rem" }} onClick={() => setFilter(k)}>{label}</button>
             ))}
           </div>
+          <button className="btn btn-green" onClick={openAdd}>+ Add person</button>
         </div>
 
-        {msg && <div style={{ fontSize: "0.83rem", marginBottom: "0.75rem", color: msg.startsWith("\u2713") ? "var(--green)" : "var(--red)" }}>{msg}</div>}
+        {msg && <div style={{ fontSize: "0.83rem", marginBottom: "0.75rem", color: msg.startsWith("✓") ? "var(--green)" : "var(--red)" }}>{msg}</div>}
 
         <div className="table-wrap">
           <table className="data-table">
@@ -1796,8 +1899,8 @@ function StaffDirectoryTab() {
                 <tr key={i}>
                   <td style={{ fontWeight: 500 }}>{p.name}</td>
                   <td>{p.designation}</td>
-                  <td className="mono" style={{ fontSize: "0.75rem" }}>{p.idNumber || "\u2014"}{p.registrationNo ? ` / ${p.registrationNo}` : ""}</td>
-                  <td className="dim" style={{ fontSize: "0.8rem" }}>{p.email || "\u2014"}</td>
+                  <td className="mono" style={{ fontSize: "0.75rem" }}>{p.idNumber || "—"}{p.registrationNo ? ` / ${p.registrationNo}` : ""}</td>
+                  <td className="dim" style={{ fontSize: "0.8rem" }}>{p.email || "—"}</td>
                   <td>{p.role
                     ? <span className="status-pill" style={{ background: "#16a34a22", color: "#16a34a" }}>{p.role}</span>
                     : <span className="dim" style={{ fontSize: "0.8rem" }}>None</span>}</td>
@@ -1806,11 +1909,12 @@ function StaffDirectoryTab() {
                       <select className="field-input" style={{ width: "auto", padding: "0.25rem 0.5rem", fontSize: "0.8rem" }}
                         value={p.role || ""} disabled={roleBusy === p.email}
                         onChange={(e) => e.target.value && assign(p, e.target.value)}>
-                        <option value="">{roleBusy === p.email ? "Working\u2026" : "Grant role\u2026"}</option>
+                        <option value="">{roleBusy === p.email ? "Working…" : "Grant role…"}</option>
                         {roleOptions(p).map((r) => <option key={r} value={r}>{r}</option>)}
                       </select>
                       {p.role && <button className="btn btn-red btn-sm" disabled={roleBusy === p.email} onClick={() => revoke(p)}>Revoke</button>}
-                      <button className="btn btn-outline btn-sm" onClick={() => removePerson(p)} title="Remove from directory">\u2715</button>
+                      <button className="btn btn-outline btn-sm" onClick={() => openEdit(p)} title="Edit details">Edit</button>
+                      <button className="btn btn-outline btn-sm" onClick={() => removePerson(p)} title="Remove from directory">✕</button>
                     </div>
                   </td>
                 </tr>
@@ -1819,10 +1923,117 @@ function StaffDirectoryTab() {
           </table>
         </div>
       </div>
+
+      {editing && (
+        <div className="modal-overlay" onClick={closeForm}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <h2 className="card-title">{isNew ? "Add Person" : "Edit Person"}</h2>
+            <div className="field-group">
+              <label className="field-label">Name *</label>
+              <input className="field-input" value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} />
+            </div>
+            <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
+              <div className="field-group" style={{ flex: 1, minWidth: "140px" }}>
+                <label className="field-label">ID No / Passport</label>
+                <input className="field-input" value={editing.idNumber} onChange={(e) => setEditing({ ...editing, idNumber: e.target.value })} />
+              </div>
+              <div className="field-group" style={{ flex: 1, minWidth: "140px" }}>
+                <label className="field-label">Registration No</label>
+                <input className="field-input" value={editing.registrationNo} onChange={(e) => setEditing({ ...editing, registrationNo: e.target.value })} />
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
+              <div className="field-group" style={{ flex: 1, minWidth: "140px" }}>
+                <label className="field-label">Designation / Speciality</label>
+                <input className="field-input" value={editing.designation} onChange={(e) => setEditing({ ...editing, designation: e.target.value })} />
+              </div>
+              <div className="field-group" style={{ flex: 1, minWidth: "140px" }}>
+                <label className="field-label">Category</label>
+                <select className="field-input" value={editing.category} onChange={(e) => setEditing({ ...editing, category: e.target.value })}>
+                  <option value="doctor">Doctor</option>
+                  <option value="staff">Staff</option>
+                </select>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
+              <div className="field-group" style={{ flex: 1, minWidth: "140px" }}>
+                <label className="field-label">Email (needed for login)</label>
+                <input className="field-input" value={editing.email} onChange={(e) => setEditing({ ...editing, email: e.target.value })} />
+              </div>
+              <div className="field-group" style={{ flex: 1, minWidth: "140px" }}>
+                <label className="field-label">Contact</label>
+                <input className="field-input" value={editing.contact} onChange={(e) => setEditing({ ...editing, contact: e.target.value })} />
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
+              <button className="btn btn-green" onClick={saveForm}>{isNew ? "Add to directory" : "Save changes"}</button>
+              <button className="btn btn-outline" onClick={closeForm}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
+
+/* ─────────────────────────────────────────────
+   ADMIN EMAILS TAB — manage Google accounts for Admin role
+───────────────────────────────────────────── */
+function AdminEmailsTab({ state, setState }) {
+  const [newEmail, setNewEmail] = useState("");
+  const [msg, setMsg] = useState("");
+  const adminEmails = state.adminEmails || [];
+
+  const add = async () => {
+    const email = newEmail.trim().toLowerCase();
+    if (!email || !email.includes("@")) { setMsg("✕ Enter a valid email address."); return; }
+    if (adminEmails.includes(email)) { setMsg("✕ That email is already an Admin."); return; }
+    const updated = [...adminEmails, email];
+    await setState({ ...state, adminEmails: updated }, { role: "DEVELOPER", action: "addAdminEmail", email });
+    setNewEmail("");
+    setMsg(`✓ ${email} added as Admin.`);
+  };
+
+  const remove = async (email) => {
+    if (!window.confirm(`Remove ${email} from Admin access?`)) return;
+    const updated = adminEmails.filter((e) => e !== email);
+    await setState({ ...state, adminEmails: updated }, { role: "DEVELOPER", action: "removeAdminEmail", email });
+    setMsg(`✓ ${email} removed.`);
+  };
+
+  return (
+    <div className="card">
+      <h2 className="card-title">Admin Google Accounts</h2>
+      <p className="dim" style={{ fontSize: "0.83rem", marginBottom: "1.25rem" }}>
+        Google accounts listed here get the <strong>Admin</strong> role when they sign in via <code>/#admin</code>. Your Developer email is separate and managed via <code>.env</code>.
+      </p>
+      <div className="add-row">
+        <input className="field-input" placeholder="admin@example.com" value={newEmail}
+          onChange={(e) => setNewEmail(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && add()} />
+        <button className="btn btn-green" onClick={add}>+ Add</button>
+      </div>
+      {msg && <div style={{ fontSize: "0.83rem", marginBottom: "0.75rem", color: msg.startsWith("✓") ? "var(--green)" : "var(--red)" }}>{msg}</div>}
+      {adminEmails.length === 0
+        ? <div className="dim">No Admin accounts yet. Add a Google email above.</div>
+        : (
+          <div className="divide-list">
+            {adminEmails.map((email) => (
+              <div key={email} className="divide-row">
+                <div>
+                  <div className="fw-med">{email}</div>
+                  <div className="dim" style={{ fontSize: "0.8rem" }}>Signs in via Google · Admin role</div>
+                </div>
+                <button className="btn btn-red btn-sm" onClick={() => remove(email)}>Remove</button>
+              </div>
+            ))}
+          </div>
+        )
+      }
+    </div>
+  );
+}
 
 /* ─────────────────────────────────────────────
    BRANDING TAB — logo upload for lobby display
@@ -1951,6 +2162,428 @@ function ScheduleTab({ state, setState }) {
           <input type="time" className="field-input" style={{ width: "auto" }} value={sched.clearTime || "06:00"} onChange={(e) => update({ clearTime: e.target.value })} />
           <div className="dim" style={{ fontSize: "0.78rem", marginTop: "0.4rem" }}>Yesterday's tokens &amp; statuses reset at this time. Assignments stay.</div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   RECEPTION PORTAL — receptionist lands here
+───────────────────────────────────────────── */
+function ReceptionPortal() {
+  const { state, ready } = useClinicState();
+  if (!ready) return <div className="portal-bg"><div className="portal-container"><div className="card dim">Loading…</div></div></div>;
+  return (
+    <div className="portal-bg">
+      <div className="portal-container">
+        <div className="portal-header">
+          <div>
+            <h1 className="portal-title">Reception</h1>
+            <div className="portal-sub">Register patients &amp; print tokens</div>
+          </div>
+        </div>
+        <PatientRegistration state={state} />
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   PATIENT HELPERS
+───────────────────────────────────────────── */
+function computeAge(dob) {
+  if (!dob) return "";
+  const d = new Date(dob);
+  if (isNaN(d)) return "";
+  const now = new Date();
+  let age = now.getFullYear() - d.getFullYear();
+  const m = now.getMonth() - d.getMonth();
+  if (m < 0 || (m === 0 && now.getDate() < d.getDate())) age--;
+  return age >= 0 && age < 150 ? age : "";
+}
+
+// Next token for a room today = highest existing today + 1
+async function nextTokenForRoom(room) {
+  const today = new Date().toISOString().slice(0, 10);
+  const q = query(VISITS_COL, where("room", "==", room), where("date", "==", today));
+  const snap = await getDocs(q);
+  let max = 0;
+  snap.forEach((d) => { const t = d.data().token || 0; if (t > max) max = t; });
+  return max + 1;
+}
+
+/* ─────────────────────────────────────────────
+   PATIENT IMPORT TAB — bulk import from Excel/CSV
+───────────────────────────────────────────── */
+function PatientImportTab() {
+  const [preview, setPreview] = useState(null);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState(null);
+  const fileRef = useRef(null);
+
+  const parseFile = async (file) => {
+    if (!file) return;
+    setMsg(""); setBusy(true);
+    try {
+      const XLSX = await import("xlsx");
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+
+      const get = (r, ...keys) => {
+        for (const want of keys) {
+          for (const k of Object.keys(r)) {
+            if (k.trim().toLowerCase().replace(/\s+/g, "") === want.toLowerCase().replace(/\s+/g, "")) {
+              const v = String(r[k]).trim();
+              if (v) return v;
+            }
+          }
+        }
+        return "";
+      };
+
+      const patients = [];
+      const seen = new Set();
+      rows.forEach((r) => {
+        const id = get(r, "NID", "ID", "idnumber", "patientid", "id no", "passport");
+        const name = get(r, "patient name", "name", "patientname", "fullname");
+        if (!id || !name) return;
+        if (seen.has(id.toLowerCase())) return;
+        seen.add(id.toLowerCase());
+        const age = get(r, "age");
+        const sex = get(r, "sex", "gender");
+        const mobile = get(r, "mobile", "phone", "contact", "tel");
+        const address = get(r, "address");
+        const notes = get(r, "notes", "remarks");
+        patients.push({ idNumber: id, name, age: age ? parseInt(age) || "" : "", sex, mobile, address, notes });
+      });
+
+      if (patients.length === 0) {
+        setMsg("No valid rows found. Make sure the file has NID and Patient Name columns.");
+      } else {
+        setPreview(patients);
+      }
+    } catch (e) {
+      setMsg("Could not read file: " + e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmImport = async () => {
+    if (!preview) return;
+    setBusy(true); setMsg(""); setProgress(0);
+    const BATCH = 200; // Firestore limit per batch write would be 500 but keep it safe
+    let done = 0;
+    try {
+      // Write in chunks to avoid overwhelming Firestore
+      for (let i = 0; i < preview.length; i++) {
+        const p = preview[i];
+        await setDoc(doc(db, "clinicq_patients", p.idNumber), {
+          idNumber: p.idNumber,
+          name: p.name,
+          age: p.age || "",
+          sex: p.sex || "",
+          mobile: p.mobile || "",
+          address: p.address || "",
+          notes: p.notes || "",
+          dob: "",
+          lastVisit: "",
+          importedAt: Date.now(),
+        }, { merge: true });
+        done++;
+        if (done % 10 === 0) setProgress(Math.round((done / preview.length) * 100));
+      }
+      setProgress(100);
+      setMsg(`✓ Imported ${done} patients successfully.`);
+      setPreview(null);
+    } catch (e) {
+      setMsg(`Import failed after ${done} records: ${e.message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+      <div className="card">
+        <h2 className="card-title">Import Patient Records</h2>
+        <p className="dim" style={{ fontSize: "0.83rem", marginBottom: "1rem" }}>
+          Upload an Excel (.xlsx) or CSV file. Columns matched: <strong>NID</strong> (ID), <strong>Patient Name</strong>, <strong>Age</strong>, <strong>Sex</strong>, plus optional Mobile, Address, Notes. Existing records are updated (merge), not overwritten.
+        </p>
+        <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }}
+          onChange={(e) => parseFile(e.target.files?.[0])} />
+        <button className="btn btn-blue" onClick={() => fileRef.current?.click()} disabled={busy}>
+          {busy ? "Reading…" : "Choose file"}
+        </button>
+        {progress !== null && progress < 100 && (
+          <div style={{ marginTop: "0.75rem" }}>
+            <div style={{ background: "var(--border)", borderRadius: "100px", height: "6px", overflow: "hidden" }}>
+              <div style={{ background: "var(--blue)", height: "100%", width: `${progress}%`, transition: "width 0.3s", borderRadius: "100px" }} />
+            </div>
+            <div className="dim" style={{ fontSize: "0.78rem", marginTop: "0.3rem" }}>Importing… {progress}%</div>
+          </div>
+        )}
+        {msg && <div style={{ fontSize: "0.83rem", marginTop: "0.75rem", color: msg.startsWith("✓") ? "var(--green)" : "var(--red)" }}>{msg}</div>}
+      </div>
+
+      {preview && (
+        <div className="card" style={{ borderColor: "var(--blue)" }}>
+          <h2 className="card-title">Preview — {preview.length} patients found</h2>
+          <div className="table-wrap" style={{ maxHeight: "350px", overflowY: "auto" }}>
+            <table className="data-table">
+              <thead><tr><th>NID</th><th>Name</th><th>Age</th><th>Sex</th></tr></thead>
+              <tbody>
+                {preview.map((p, i) => (
+                  <tr key={i}>
+                    <td className="mono" style={{ fontSize: "0.8rem" }}>{p.idNumber}</td>
+                    <td>{p.name}</td>
+                    <td>{p.age || "—"}</td>
+                    <td>{p.sex || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem", alignItems: "center" }}>
+            <button className="btn btn-green" onClick={confirmImport} disabled={busy}>
+              {busy ? "Importing…" : `Import ${preview.length} patients`}
+            </button>
+            <button className="btn btn-outline" onClick={() => setPreview(null)} disabled={busy}>Cancel</button>
+            <span className="dim" style={{ fontSize: "0.8rem" }}>This may take a moment for large files.</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   PATIENT REGISTRATION — Admin / Receptionist
+───────────────────────────────────────────── */
+function PatientRegistration({ state }) {
+  const blank = { idNumber: "", name: "", mobile: "", dob: "", sex: "", address: "", notes: "" };
+  const [form, setForm] = useState(blank);
+  const [room, setRoom] = useState("");
+  const [lookupMsg, setLookupMsg] = useState("");
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [lastTicket, setLastTicket] = useState(null); // for printing
+  const [todayVisits, setTodayVisits] = useState([]);
+
+  const assignedRooms = (state.rooms || []).filter((r) => state.assigned[r]);
+
+  const loadToday = async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    try {
+      const q = query(VISITS_COL, where("date", "==", today), orderBy("createdAt", "desc"), limit(50));
+      const snap = await getDocs(q);
+      setTodayVisits(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    } catch {
+      // composite index may be building; fall back to unordered
+      try {
+        const q2 = query(VISITS_COL, where("date", "==", today));
+        const snap2 = await getDocs(q2);
+        setTodayVisits(snap2.docs.map((d) => ({ id: d.id, ...d.data() })));
+      } catch {}
+    }
+  };
+  useEffect(() => { loadToday(); }, []);
+
+  // Look up returning patient by ID
+  const lookup = async () => {
+    const id = form.idNumber.trim();
+    if (!id) return;
+    setLookupMsg("Searching…");
+    try {
+      const snap = await getDoc(doc(db, "clinicq_patients", id));
+      if (snap.exists()) {
+        const p = snap.data();
+        setForm({ idNumber: id, name: p.name || "", mobile: p.mobile || "", dob: p.dob || "", sex: p.sex || "", address: p.address || "", notes: p.notes || "" });
+        setLookupMsg("✓ Returning patient — details loaded.");
+      } else {
+        setLookupMsg("New patient — fill in details below.");
+      }
+    } catch (e) {
+      setLookupMsg("Lookup failed: " + e.message);
+    }
+  };
+
+  const register = async () => {
+    if (!form.name.trim()) { setMsg("✕ Name is required."); return; }
+    if (!form.idNumber.trim()) { setMsg("✕ ID/Passport is required."); return; }
+    if (!room) { setMsg("✕ Please select a doctor/room."); return; }
+    setBusy(true); setMsg("");
+    try {
+      const id = form.idNumber.trim();
+      const today = new Date().toISOString().slice(0, 10);
+      const now = Date.now();
+
+      // Upsert patient master record
+      await setDoc(doc(db, "clinicq_patients", id), {
+        idNumber: id,
+        name: form.name.trim(),
+        mobile: form.mobile.trim(),
+        dob: form.dob,
+        sex: form.sex || "",
+        address: form.address.trim(),
+        notes: form.notes.trim(),
+        lastVisit: today,
+        updatedAt: now,
+      }, { merge: true });
+
+      // Assign next token for the room
+      const token = await nextTokenForRoom(room);
+      const doctorName = state.assigned[room]?.name || "";
+
+      // Create the visit
+      await addDoc(VISITS_COL, {
+        patientId: id,
+        name: form.name.trim(),
+        room,
+        doctorName,
+        token,
+        date: today,
+        status: "waiting",
+        createdAt: now,
+      });
+
+      setLastTicket({ token, room, doctorName, name: form.name.trim(), date: today, time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) });
+      setMsg(`✓ ${form.name.trim()} registered — token ${token} for ${room}.`);
+      setForm(blank);
+      setRoom("");
+      setLookupMsg("");
+      loadToday();
+    } catch (e) {
+      setMsg("Registration failed: " + e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const printTicket = () => {
+    if (!lastTicket) return;
+    const t = lastTicket;
+    const w = window.open("", "_blank", "width=320,height=480");
+    w.document.write(`
+      <html><head><title>Token ${t.token}</title>
+      <style>
+        body { font-family: system-ui, sans-serif; text-align: center; padding: 16px; }
+        .clinic { font-size: 16px; font-weight: 700; margin-bottom: 4px; }
+        .token { font-size: 72px; font-weight: 800; margin: 12px 0; }
+        .row { font-size: 14px; margin: 4px 0; }
+        .label { color: #666; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+        hr { border: none; border-top: 1px dashed #999; margin: 12px 0; }
+      </style></head><body>
+        <div class="clinic">${CLINIC_NAME}</div>
+        <hr/>
+        <div class="label">Token Number</div>
+        <div class="token">${t.token}</div>
+        <div class="row"><strong>${t.room}</strong>${t.doctorName ? " — " + t.doctorName : ""}</div>
+        <div class="row">${t.name}</div>
+        <hr/>
+        <div class="row">${t.date} · ${t.time}</div>
+        <div class="label" style="margin-top:8px">Please wait for your number</div>
+      </body></html>
+    `);
+    w.document.close();
+    w.focus();
+    setTimeout(() => { w.print(); }, 250);
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+      <div className="card">
+        <h2 className="card-title">Register Patient</h2>
+
+        <div className="field-group">
+          <label className="field-label">ID / Passport No *</label>
+          <div style={{ display: "flex", gap: "0.5rem" }}>
+            <input className="field-input" value={form.idNumber}
+              onChange={(e) => setForm({ ...form, idNumber: e.target.value })}
+              onBlur={lookup}
+              placeholder="Enter ID then press Tab to look up" />
+            <button className="btn btn-outline" onClick={lookup} type="button">Look up</button>
+          </div>
+          {lookupMsg && <div style={{ fontSize: "0.8rem", marginTop: "0.4rem", color: lookupMsg.startsWith("✓") ? "var(--green)" : "var(--text-dim)" }}>{lookupMsg}</div>}
+        </div>
+
+        <div className="field-group">
+          <label className="field-label">Full Name *</label>
+          <input className="field-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+        </div>
+
+        <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
+          <div className="field-group" style={{ flex: 1, minWidth: "140px" }}>
+            <label className="field-label">Mobile</label>
+            <input className="field-input" value={form.mobile} onChange={(e) => setForm({ ...form, mobile: e.target.value })} />
+          </div>
+          <div className="field-group" style={{ flex: 1, minWidth: "140px" }}>
+            <label className="field-label">Date of Birth {form.dob && computeAge(form.dob) !== "" ? `(age ${computeAge(form.dob)})` : ""}</label>
+            <input type="date" className="field-input" value={form.dob} onChange={(e) => setForm({ ...form, dob: e.target.value })} />
+          </div>
+          <div className="field-group" style={{ flex: 1, minWidth: "100px" }}>
+            <label className="field-label">Sex</label>
+            <select className="field-input" value={form.sex} onChange={(e) => setForm({ ...form, sex: e.target.value })}>
+              <option value="">—</option>
+              <option value="M">Male</option>
+              <option value="F">Female</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="field-group">
+          <label className="field-label">Address</label>
+          <input className="field-input" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
+        </div>
+
+        <div className="field-group">
+          <label className="field-label">Notes (administrative)</label>
+          <input className="field-input" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="e.g. wheelchair access, follow-up" />
+        </div>
+
+        <div className="field-group">
+          <label className="field-label">Doctor / Room *</label>
+          <select className="field-input" value={room} onChange={(e) => setRoom(e.target.value)}>
+            <option value="">— Select —</option>
+            {assignedRooms.map((r) => (
+              <option key={r} value={r}>{r} — {state.assigned[r]?.name} ({state.assigned[r]?.department})</option>
+            ))}
+          </select>
+          {assignedRooms.length === 0 && <div style={{ fontSize: "0.8rem", color: "var(--red)", marginTop: "0.4rem" }}>No doctors assigned to rooms yet. Ask Admin to assign one.</div>}
+        </div>
+
+        {msg && <div style={{ fontSize: "0.85rem", marginBottom: "0.75rem", color: msg.startsWith("✓") ? "var(--green)" : "var(--red)" }}>{msg}</div>}
+
+        <div style={{ display: "flex", gap: "0.5rem" }}>
+          <button className="btn btn-green" onClick={register} disabled={busy}>{busy ? "Registering…" : "Register & assign token"}</button>
+          {lastTicket && <button className="btn btn-blue" onClick={printTicket}>🖨 Print token {lastTicket.token}</button>}
+        </div>
+      </div>
+
+      <div className="card">
+        <h2 className="card-title">Today's Registrations ({todayVisits.length})</h2>
+        {todayVisits.length === 0 ? <div className="dim">No registrations yet today.</div> : (
+          <div className="table-wrap">
+            <table className="data-table">
+              <thead><tr><th>Token</th><th>Name</th><th>Room</th><th>Doctor</th><th>Status</th></tr></thead>
+              <tbody>
+                {todayVisits.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).map((v) => (
+                  <tr key={v.id}>
+                    <td style={{ fontWeight: 700 }}>{v.token}</td>
+                    <td>{v.name}</td>
+                    <td className="mono">{v.room}</td>
+                    <td>{v.doctorName || "—"}</td>
+                    <td><span className="status-pill" style={{ background: v.status === "served" ? "#64748b22" : "#16a34a22", color: v.status === "served" ? "#64748b" : "#16a34a" }}>{v.status}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2579,6 +3212,8 @@ select.field-input { cursor: pointer; }
 .fw-med { font-weight: 500; }
 .dim { color: var(--text-dim); }
 .mono { font-family: 'JetBrains Mono', monospace; }
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 1rem; }
+.modal-card { background: var(--surface); border-radius: var(--radius); padding: 1.5rem; width: 100%; max-width: 520px; max-height: 90vh; overflow-y: auto; box-shadow: 0 10px 40px rgba(0,0,0,0.25); }
 .btn-google { background: var(--surface); color: var(--text); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; }
 .btn-google:hover { background: #f9fafb; }
 .login-divider { display: flex; align-items: center; gap: 0.75rem; margin: 1rem 0; color: var(--text-dim); font-size: 0.8rem; }

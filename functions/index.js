@@ -21,7 +21,7 @@ setGlobalOptions({ region: "us-central1", maxInstances: 5 });
 // assertDeveloper() below still enforces who can actually act.
 const DEVELOPER_EMAIL = process.env.DEVELOPER_EMAIL || "";
 
-const VALID_ROLES = ["DOCTOR", "RECEPTIONIST", "ADMIN", "SUPERADMIN"];
+const VALID_ROLES = ["DOCTOR", "RECEPTIONIST", "ADMIN"];
 
 // Guard: only the developer may call these functions
 function assertDeveloper(request) {
@@ -63,10 +63,9 @@ exports.createStaffAccount = onCall({ invoker: "public" }, async (request) => {
     // Set the role (and clear any room until Admin assigns one)
     await admin.auth().setCustomUserClaims(user.uid, { role });
 
-    // Generate a password-reset link the person uses to set their password
-    const link = await admin.auth().generatePasswordResetLink(email);
-
-    return { success: true, uid: user.uid, resetLink: link };
+    // Note: the password-setup email is sent client-side via
+    // sendPasswordResetEmail(), which uses Firebase's built-in email service.
+    return { success: true, uid: user.uid };
   } catch (e) {
     throw new HttpsError("internal", e.message);
   }

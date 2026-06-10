@@ -45,8 +45,6 @@ function roleToEmail(role, room = null) {
 export function emailToRole(email) {
   if (!email) return { role: null, room: null };
   if (DEVELOPER_EMAIL && email === DEVELOPER_EMAIL) return { role: "DEVELOPER", room: null };
-  if (email === "superadmin@clinicq.local") return { role: "SUPERADMIN", room: null };
-  if (email === "admin@clinicq.local")      return { role: "ADMIN", room: null };
   const m = email.match(/^([a-z0-9]+)@clinicq\.local$/);
   if (m) return { role: "DOCTOR", room: m[1].toUpperCase() };
   return { role: null, room: null };
@@ -69,6 +67,17 @@ export function onAuthChange(callback) {
       callback({ user, role: "DEVELOPER", room: null });
       return;
     }
+    // Check if this Google account is in the adminEmails whitelist
+    try {
+      const configSnap = await getDoc(doc(db, "clinicq", "config"));
+      if (configSnap.exists()) {
+        const adminEmails = configSnap.data().adminEmails || [];
+        if (adminEmails.includes(user.email?.toLowerCase())) {
+          callback({ user, role: "ADMIN", room: null });
+          return;
+        }
+      }
+    } catch {}
     // Personal staff accounts carry their role as a custom claim
     try {
       const token = await user.getIdTokenResult();
