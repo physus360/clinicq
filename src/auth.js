@@ -2,12 +2,10 @@
  * auth.js — ClinicQ authentication
  *
  * DEVELOPER  → Google Sign-In (only your email allowed)
- * SUPERADMIN → username + password → Firebase Auth email account
  * ADMIN      → username + password → Firebase Auth email account
  * DOCTOR     → username + password → Firebase Auth email account (per room)
  *
  * Firebase Auth emails:
- *   superadmin → superadmin@clinicq.local
  *   admin      → admin@clinicq.local
  *   room R01   → r01@clinicq.local
  */
@@ -36,7 +34,6 @@ export async function sha256(text) {
 }
 
 function roleToEmail(role, room = null) {
-  if (role === "SUPERADMIN") return "superadmin@clinicq.local";
   if (role === "ADMIN")      return "admin@clinicq.local";
   if (role === "DOCTOR" && room) return `${room.toLowerCase()}@clinicq.local`;
   throw new Error("Cannot determine auth email for role: " + role);
@@ -169,7 +166,7 @@ export async function initCredentials(rooms) {
     }
     return;
   }
-  const [saHash, adHash] = await Promise.all([sha256("root00"), sha256("admin1")]);
+  const adHash = await sha256("admin1");
   const roomEntries = await Promise.all(
     rooms.map(async (id) => {
       const p = `room_${id.toLowerCase()}`;
@@ -177,11 +174,9 @@ export async function initCredentials(rooms) {
     })
   );
   await setDoc(CREDS_DOC, {
-    superadmin: { username: "root",  passwordHash: saHash  },
     admin:      { username: "admin", passwordHash: adHash  },
     rooms:      Object.fromEntries(roomEntries),
   });
-  await _createAuthAccount("superadmin@clinicq.local", "root00");
   await _createAuthAccount("admin@clinicq.local",      "admin1");
   for (const id of rooms) {
     await _createAuthAccount(`${id.toLowerCase()}@clinicq.local`, `room_${id.toLowerCase()}`);
@@ -260,9 +255,7 @@ export async function changePassword(role, newUsername, newPassword, room = null
   const creds = snap.exists() ? snap.data() : {};
   const hash = await sha256(newPassword);
 
-  if (role === "SUPERADMIN") {
-    await setDoc(CREDS_DOC, { ...creds, superadmin: { username: newUsername, passwordHash: hash } });
-  } else if (role === "ADMIN") {
+  if (role === "ADMIN") {
     await setDoc(CREDS_DOC, { ...creds, admin: { username: newUsername, passwordHash: hash } });
   } else if (role === "DOCTOR" && room) {
     await setDoc(CREDS_DOC, {
