@@ -265,7 +265,7 @@ function useClinicState() {
       JSON.stringify(next[f]) !== JSON.stringify(cur.config[f])
     );
     if (configChanged) {
-      await pushConfig({ rooms: next.rooms, doctorDirectory: next.doctorDirectory, chime: next.chime, schedule: next.schedule, adminEmails: next.adminEmails || [] });
+      await pushConfig({ rooms: next.rooms, doctorDirectory: next.doctorDirectory, chime: next.chime, schedule: next.schedule, adminEmails: next.adminEmails || [], lobbyTheme: next.lobbyTheme || "dark" });
     }
 
     // Detect per-room changes and write only those rooms
@@ -466,7 +466,11 @@ export default function ClinicQ() {
    TOP NAV
 ───────────────────────────────────────────── */
 function TopNav({ navigate, role, room }) {
-  const logout = async () => { await logout_(); navigate("lobby"); };
+  const logout = async () => {
+    await logout_();
+    // Hard redirect to lobby — clears all React state cleanly
+    window.location.href = window.location.pathname;
+  };
 
   return (
     <nav className="topnav">
@@ -509,20 +513,21 @@ function LobbyLogo() {
 /* ─────────────────────────────────────────────
    LOBBY QR CODE
 ───────────────────────────────────────────── */
-function LobbyQR({ url }) {
+function LobbyQR({ url, dark = true }) {
   const canvasRef = useRef(null);
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const size = 80;
-    // Simple QR using qrcode library via CDN — fallback to text if unavailable
     import("https://esm.sh/qrcode@1.5.3").then((QRCode) => {
       QRCode.toCanvas(canvas, url, {
         width: size, margin: 1,
-        color: { dark: "#ffffff", light: "#00000000" },
+        color: dark
+          ? { dark: "#ffffff", light: "#00000000" }  // white on transparent (for dark lobby)
+          : { dark: "#000000", light: "#ffffff" },     // black on white (for light portals)
       });
     }).catch(() => {});
-  }, [url]);
+  }, [url, dark]);
   return (
     <div className="lobby-qr-wrap">
       <canvas ref={canvasRef} width={80} height={80} />
@@ -658,9 +663,9 @@ function ClosedSplash({ schedule }) {
 function Lobby() {
   const { state, setRoom, ready, online } = useClinicState();
   const [tick, setTick] = useState(0);
-  const [theme, setTheme] = useState("dark"); // "dark" | "light"
   const lobbyRef = useRef(null);
   const lastClearRef = useRef(null);
+  const theme = state.lobbyTheme || "dark";
 
   useEffect(() => { const t = setInterval(() => setTick((n) => n + 1), 1000); return () => clearInterval(t); }, []);
 
@@ -675,11 +680,18 @@ function Lobby() {
     if (cur >= clearAt && cur < clearAt + 2 && storedKey !== todayKey && lastClearRef.current !== todayKey) {
       lastClearRef.current = todayKey;
       localStorage.setItem("cq_last_clear", todayKey);
-      (state.rooms || DEFAULT_ROOMS).forEach((id) => {
+      const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+      (state.rooms || DEFAULT_ROOMS).forEach(async (id) => {
         if (state.status[id] !== "IDLE" || state.nowServing[id] != null) {
           setRoom(id, { sessions: null, nowServing: null, upNext: null, customCall: null, status: "IDLE" },
             { role: "SYSTEM", action: "dailyAutoClear", room: id });
         }
+        // Clear any leftover waiting visits from yesterday
+        try {
+          const q = query(VISITS_COL, where("room", "==", id), where("date", "==", yesterday), where("status", "==", "waiting"));
+          const snap = await getDocs(q);
+          await Promise.all(snap.docs.map((d) => setDoc(doc(db, "clinicq_visits", d.id), { status: "cleared" }, { merge: true })));
+        } catch {}
       });
     }
   }, [tick, ready]);
@@ -711,13 +723,7 @@ function Lobby() {
       {/* Top bar: logo + connection dot + theme toggle */}
       <div className="lobby-topbar">
         <LobbyLogo />
-        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-          <span className={`conn-dot ${online ? "conn-online" : "conn-offline"}`} title={online ? "Connected" : "Disconnected"} />
-          <button className="lobby-theme-btn" onClick={() => setTheme(isDark ? "light" : "dark")}
-            title={isDark ? "Switch to light mode" : "Switch to dark mode"}>
-            {isDark ? "☀" : "☾"}
-          </button>
-        </div>
+        <span className={`conn-dot ${online ? "conn-online" : "conn-offline"}`} title={online ? "Connected" : "Disconnected"} />
       </div>
 
       {/* Room cards */}
@@ -808,8 +814,27 @@ function LoginPage({ navigate }) {
           {loading ? "Signing in…" : "Sign in"}
         </button>
 
-        <div className="dim" style={{ fontSize: "0.75rem", textAlign: "center", marginTop: "0.75rem" }}>
-          Forgot your password? Ask the Developer to resend a setup email.
+        <div className="login-divider"><span>or</span></div>
+
+        <button className="btn btn-google w-full" onClick={async () => {
+          setErr(""); setLoading(true);
+          try {
+            const r = await signInWithGoogle();
+            if (r?.redirecting) return;
+            if (!r?.success) setErr(r?.error || "Access denied. Your account is not authorised as staff.");
+          } catch (e) { setErr(e.message); }
+          finally { setLoading(false); }
+        }} disabled={loading}>
+          <svg width="18" height="18" viewBox="0 0 18 18" style={{ marginRight: "8px" }}>
+            <path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z"/>
+            <path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/>
+            <path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/>
+            <path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/>
+          </svg>
+          {loading ? "Signing in…" : "Sign in with Google"}
+        </button>
+        <div className="dim" style={{ fontSize: "0.75rem", textAlign: "center", marginTop: "0.5rem" }}>
+          Forgot your password? Ask Admin to send a reset email.
         </div>
       </div>
     </div>
@@ -874,48 +899,138 @@ function DoctorPortal({ room: roomProp }) {
   const { user } = useAuth();
 
   // Find which room this doctor is assigned to
-  // roomProp is set for legacy room-based logins
-  // For personal logins, find by matching doctor name in assignments
+  const [debugInfo, setDebugInfo] = useState("");
+  const [manualRoom, setManualRoom] = useState(sessionStorage.getItem("cq_doctor_room") || null);
   const room = (() => {
     if (roomProp) return roomProp;
-    if (!user) return null;
-    // Match by email in doctorDirectory, then find assigned room
-    const doctorEntry = Object.values(state.doctorDirectory || {}).find(
-      (d) => d.email === user.email
+    if (!user || !ready) return null;
+
+    // Check manually selected room first (doctor picked from list)
+    if (manualRoom && (state.rooms || DEFAULT_ROOMS).includes(manualRoom)) return manualRoom;
+
+    const allDoctors = Object.values(state.doctorDirectory || {});
+    const allAssigned = Object.entries(state.assigned || {});
+
+    // 1. Match by email in doctorDirectory
+    const byEmail = allDoctors.find(
+      (d) => d.email && d.email.toLowerCase() === user.email?.toLowerCase()
     );
-    if (doctorEntry) {
-      const assignedRoom = Object.entries(state.assigned || {}).find(
-        ([, a]) => a?.id === doctorEntry.id
-      );
-      if (assignedRoom) return assignedRoom[0];
+    if (byEmail) {
+      const r = allAssigned.find(([, a]) => a?.id === byEmail.id);
+      if (r) return r[0];
+      // Found in directory but not assigned to a room
+      return "__notassigned__";
     }
-    // Fallback: find any room assigned to a doctor with matching name
-    // (useful if email not stored in directory)
+
+    // 2. Match by display name from Firebase Auth
+    const displayName = user.displayName || "";
+    if (displayName) {
+      const byName = allDoctors.find(
+        (d) => d.name && d.name.toLowerCase() === displayName.toLowerCase()
+      );
+      if (byName) {
+        const r = allAssigned.find(([, a]) => a?.id === byName.id);
+        if (r) return r[0];
+        return "__notassigned__";
+      }
+    }
+
+    // 3. Match by email stored in room assignment
+    const byAssigned = allAssigned.find(
+      ([, a]) => a?.email && a.email.toLowerCase() === user.email?.toLowerCase()
+    );
+    if (byAssigned) return byAssigned[0];
+
+    // 4. Match by UID stored in room assignment
+    const byUid = allAssigned.find(([, a]) => a?.uid && a.uid === user.uid);
+    if (byUid) return byUid[0];
+
+    // 5. Match by email prefix vs doctor name (last resort)
+    const emailPrefix = user.email?.split("@")[0]?.toLowerCase().replace(/[^a-z]/g, "") || "";
+    if (emailPrefix.length > 3) {
+      const byPrefix = allDoctors.find(
+        (d) => d.name && d.name.toLowerCase().replace(/[^a-z]/g, "").includes(emailPrefix)
+      );
+      if (byPrefix) {
+        const r = allAssigned.find(([, a]) => a?.id === byPrefix.id);
+        if (r) return r[0];
+        return "__notassigned__";
+      }
+    }
+
     return null;
   })();
-  // room passed from App root via Firebase Auth state
+  const actualRoom = (room && room !== "__notassigned__") ? room : null;
   const play = useChime(state.chime);
 
-  const assigned = room ? state.assigned[room] : null;
-  const nowServing = room ? (state.customCall[room] ?? state.nowServing[room]) : null;
-  const upNext = room ? state.upNext[room] : null;
-  const status = room ? (state.status[room] || "IDLE") : "IDLE";
-  const session = room ? state.sessions[room] : null;
+  const assigned = actualRoom ? state.assigned[actualRoom] : null;
+  const nowServing = actualRoom ? (state.customCall[actualRoom] ?? state.nowServing[actualRoom]) : null;
+  const upNext = actualRoom ? state.upNext[actualRoom] : null;
+  const status = actualRoom ? (state.status[actualRoom] || "IDLE") : "IDLE";
+  const session = actualRoom ? state.sessions[actualRoom] : null;
 
-  if (!room) {
+  if (!ready) {
+    return (
+      <div className="portal-bg">
+        <div className="portal-container">
+          <div className="card" style={{ textAlign: "center", padding: "3rem" }}>
+            <div className="spinner" style={{ margin: "0 auto 1rem" }} />
+            <div className="dim">Connecting…</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!actualRoom) {
+    const matchedByEmail = Object.values(state.doctorDirectory || {}).find(
+      (d) => d.email?.toLowerCase() === user?.email?.toLowerCase()
+    );
     return (
       <div className="portal-bg">
         <div className="portal-container">
           <div className="portal-header">
             <div>
               <h1 className="portal-title">Doctor Portal</h1>
-              <div className="portal-sub">Not assigned to a room</div>
+              <div className="portal-sub">{user?.email}</div>
             </div>
           </div>
-          <div className="card" style={{ textAlign: "center", padding: "3rem" }}>
-            <div style={{ fontSize: "2rem", marginBottom: "1rem" }}>🏥</div>
-            <div style={{ fontWeight: 600, marginBottom: "0.5rem" }}>You are not assigned to a room yet</div>
-            <div className="dim">Please ask Reception to assign you to a room for today.</div>
+          <div className="card" style={{ padding: "2rem" }}>
+            <div style={{ textAlign: "center", marginBottom: "1.5rem" }}>
+              <div style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>🏥</div>
+              <div style={{ fontWeight: 600, marginBottom: "0.5rem" }}>
+                {room === "__notassigned__" ? "Not assigned to a room yet" : "Select your room"}
+              </div>
+              <div className="dim" style={{ fontSize: "0.85rem" }}>
+                {room === "__notassigned__"
+                  ? "You are in the directory but not yet assigned to a room. Ask Reception to assign you, or select your room below."
+                  : "Your email was not found in the doctor directory. Select your room below, or ask the Developer to add your email to your directory entry."}
+              </div>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", maxWidth: "320px", margin: "0 auto" }}>
+              {(state.rooms || DEFAULT_ROOMS).map((r) => {
+                const a = state.assigned[r];
+                return (
+                  <button key={r} className="btn btn-outline"
+                    style={{ padding: "0.75rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}
+                    onClick={() => {
+                      sessionStorage.setItem("cq_doctor_room", r);
+                      setManualRoom(r);
+                    }}>
+                    <span className="fw-med">{roomDisplay(r)}</span>
+                    <span className="dim" style={{ fontSize: "0.82rem" }}>{a ? a.name : "Unassigned"}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ marginTop: "1.5rem", background: "var(--bg)", borderRadius: "8px", padding: "0.75rem", fontSize: "0.75rem" }}>
+              <div className="dim" style={{ marginBottom: "0.3rem" }}>Debug info (share with Developer if issues persist):</div>
+              <div className="mono" style={{ fontSize: "0.7rem" }}>Email: {user?.email || "(blank)"}</div>
+              <div className="mono" style={{ fontSize: "0.7rem" }}>UID: {user?.uid?.slice(0, 16)}…</div>
+              <div className="mono" style={{ fontSize: "0.7rem" }}>Display name: {user?.displayName || "(none)"}</div>
+              <div className="mono" style={{ fontSize: "0.7rem" }}>In directory: {matchedByEmail ? "Yes — " + matchedByEmail.name : "No match found"}</div>
+              <div className="mono" style={{ fontSize: "0.7rem" }}>Assigned rooms: {Object.entries(state.assigned || {}).filter(([,a]) => a).map(([r,a]) => `${r}:${a?.name}`).join(", ") || "none"}</div>
+            </div>
           </div>
         </div>
       </div>
@@ -924,8 +1039,8 @@ function DoctorPortal({ room: roomProp }) {
 
   // Write only this room's document, then chime
   const act = async (patch, auditAction, chimeType = "CALL") => {
-    if (!room) return;
-    await setRoomState(room, patch, { role: "DOCTOR", action: auditAction, room, ts: Date.now() });
+    if (!actualRoom) return;
+    await setRoomState(actualRoom, patch, { role: "DOCTOR", action: auditAction, room: actualRoom, ts: Date.now() });
     play(chimeType, { force: true });
   };
 
@@ -943,6 +1058,7 @@ function DoctorPortal({ room: roomProp }) {
   const endSession = async () => {
     const sess = state.sessions[room];
     const endedAt = Date.now();
+    const today = new Date().toISOString().slice(0, 10);
     // Save completed session to history
     if (sess?.startedAt) {
       try {
@@ -960,6 +1076,12 @@ function DoctorPortal({ room: roomProp }) {
         });
       } catch (e) { console.warn("Session save failed:", e.message); }
     }
+    // Clear all remaining waiting appointments for this room today
+    try {
+      const q = query(VISITS_COL, where("room", "==", actualRoom), where("date", "==", today), where("status", "==", "waiting"));
+      const snap = await getDocs(q);
+      await Promise.all(snap.docs.map((d) => setDoc(doc(db, "clinicq_visits", d.id), { status: "cleared" }, { merge: true })));
+    } catch (e) { console.warn("Clear appointments failed:", e.message); }
     act({
       sessions: null,
       nowServing: null,
@@ -1047,14 +1169,14 @@ function DoctorPortal({ room: roomProp }) {
   const today = new Date().toISOString().slice(0, 10);
 
   useEffect(() => {
-    const q = query(VISITS_COL, where("room", "==", room), where("date", "==", today));
+    const q = query(VISITS_COL, where("room", "==", actualRoom), where("date", "==", today));
     const unsub = onSnapshot(q, (snap) => {
       const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
       list.sort((a, b) => (a.token || 0) - (b.token || 0));
       setPatients(list);
     });
     return unsub;
-  }, [room, today]);
+  }, [actualRoom, today]);
 
   const markServed = async (visitId) => {
     try {
@@ -1068,10 +1190,18 @@ function DoctorPortal({ room: roomProp }) {
         <div className="portal-header">
           <div>
             <h1 className="portal-title">Doctor Portal</h1>
-            <div className="portal-sub">{room}{assigned ? ` · ${assigned.name}` : " · Unassigned"}</div>
+            <div className="portal-sub">{actualRoom ? roomDisplay(actualRoom) : ""}{assigned ? ` · ${assigned.name}` : " · Unassigned"}</div>
           </div>
-          <div className="status-pill" style={{ background: statusColor(status) + "22", color: statusColor(status) }}>
-            {status}
+          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+            <div className="status-pill" style={{ background: statusColor(status) + "22", color: statusColor(status) }}>
+              {status}
+            </div>
+            {manualRoom && (
+              <button className="btn btn-outline btn-sm" onClick={() => {
+                sessionStorage.removeItem("cq_doctor_room");
+                setManualRoom(null);
+              }}>Change Room</button>
+            )}
           </div>
         </div>
 
@@ -1198,7 +1328,7 @@ function AdminPortal() {
   const assign = async (roomId, doctorId) => {
     const d = doctorId ? state.doctorDirectory[doctorId] : null;
     await setRoom(roomId, {
-      assigned: d ? { id: d.id, name: d.name, department: d.specialty || "General" } : null,
+      assigned: d ? { id: d.id, name: d.name, department: d.specialty || "General", email: d.email || "" } : null,
       status: "IDLE", sessions: null, nowServing: null, upNext: null, customCall: null,
     }, { role: "ADMIN", action: "assignDoctor", roomId, doctorId });
   };
@@ -1214,7 +1344,17 @@ function AdminPortal() {
     const name = form.name.trim();
     if (!name) return;
     const id = `doc_${Date.now()}`;
-    await setState({ ...state, doctorDirectory: { ...state.doctorDirectory, [id]: { id, name, specialty: form.specialty.trim(), active: true } } }, { role: "ADMIN", action: "doctorAdd", id });
+    const newDoc = { id, name, specialty: form.specialty.trim(), active: true };
+    await setState({ ...state, doctorDirectory: { ...state.doctorDirectory, [id]: newDoc } }, { role: "ADMIN", action: "doctorAdd", id });
+    // Sync to staff directory
+    try {
+      const snap = await getDoc(STAFF_DOC);
+      const people = snap.exists() ? (snap.data().people || []) : [];
+      if (!people.find((p) => p.name === name)) {
+        people.push({ name, designation: form.specialty.trim() || "Doctor", category: "doctor", idNumber: "", registrationNo: "", email: "", contact: "", role: null });
+        await setDoc(STAFF_DOC, { people }, { merge: true });
+      }
+    } catch {}
     setForm({ name: "", specialty: "" });
   };
   const editDoctor = async (id) => {
@@ -1276,8 +1416,8 @@ function AdminPortal() {
   useEffect(() => { if (tab === "audit") loadAudit(); }, [tab]);
 
   const doctors = Object.values(state.doctorDirectory || {});
-  const TABS = ["rooms", "doctors", "credentials", "branding", "schedule", "chime", "analytics", "audit"];
-  const TAB_LABELS = { rooms: "Rooms", doctors: "Doctors", credentials: "Credentials", branding: "Branding", schedule: "Schedule", chime: "Chime", analytics: "Analytics", audit: "Audit" };
+  const TABS = ["rooms", "doctors", "stafflogins", "analytics", "audit", "settings"];
+  const TAB_LABELS = { rooms: "🏥 Rooms", doctors: "👤 Doctors", stafflogins: "👥 Staff Logins", analytics: "📊 Analytics", audit: "📋 Audit", settings: "⚙️ Settings" };
 
   return (
     <div className="portal-bg">
@@ -1372,38 +1512,9 @@ function AdminPortal() {
           </div>
         )}
 
-        {tab === "credentials" && <CredentialsTab rooms={state.rooms || DEFAULT_ROOMS} />}
-        {tab === "branding" && <BrandingTab />}
-        {tab === "schedule" && <ScheduleTab state={state} setState={setState} />}
-
-        {tab === "chime" && (
-          <div className="card">
-            <h2 className="card-title">Chime Settings</h2>
-            <div className="chime-grid">
-              <label className="toggle-row"><span>Enabled</span><input type="checkbox" checked={!!state.chime?.enabled} onChange={(e) => updateChime({ enabled: e.target.checked })} /></label>
-              <label className="toggle-row"><span>Do Not Disturb</span><input type="checkbox" checked={!!state.chime?.doNotDisturb} onChange={(e) => updateChime({ doNotDisturb: e.target.checked })} /></label>
-              <div className="field-group">
-                <label className="field-label">Volume — {Math.round((state.chime?.volume ?? 0.22) * 100)}%</label>
-                <input type="range" min="0" max="1" step="0.01" value={state.chime?.volume ?? 0.22} onChange={(e) => updateChime({ volume: parseFloat(e.target.value) })} style={{ width: "100%" }} />
-              </div>
-              <div className="field-group">
-                <label className="field-label">Quiet Hours</label>
-                <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-                  <input type="time" className="field-input" style={{ width: "auto" }} value={state.chime?.dndStart || "22:00"} onChange={(e) => updateChime({ dndStart: e.target.value })} />
-                  <span className="dim">to</span>
-                  <input type="time" className="field-input" style={{ width: "auto" }} value={state.chime?.dndEnd || "07:00"} onChange={(e) => updateChime({ dndEnd: e.target.value })} />
-                </div>
-              </div>
-              <div className="field-group">
-                <label className="field-label">Min gap between chimes (sec)</label>
-                <input type="number" className="field-input" style={{ width: "80px" }} min="0" max="30" value={state.chime?.minGapSec ?? 3} onChange={(e) => updateChime({ minGapSec: parseInt(e.target.value) || 0 })} />
-              </div>
-              <button className="btn btn-blue" onClick={testChime}>Test Chime</button>
-            </div>
-          </div>
-        )}
-
+        {tab === "stafflogins" && <StaffLoginsTab />}
         {tab === "analytics" && <AnalyticsTab />}
+        {tab === "settings" && <AdminSettingsTab state={state} setState={setState} />}
 
         {tab === "audit" && (
           <div className="card">
@@ -1433,6 +1544,157 @@ function AdminPortal() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   STAFF LOGINS TAB — Admin sends password resets
+───────────────────────────────────────────── */
+function StaffLoginsTab() {
+  const [staff, setStaff] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [msg, setMsg] = useState({});
+  const [busy, setBusy] = useState(null);
+
+  useEffect(() => {
+    getDoc(STAFF_DOC).then((snap) => {
+      const people = snap.exists() ? (snap.data().people || []) : [];
+      // Only doctors and receptionists
+      setStaff(people.filter((p) => p.email));  // Show all staff with an email address
+      setLoading(false);
+    }).catch(() => setLoading(false));
+  }, []);
+
+  const sendReset = async (person) => {
+    if (!person.email) { setMsg((m) => ({ ...m, [person.email]: "No email on file." })); return; }
+    setBusy(person.email);
+    try {
+      const { sendPasswordResetEmail } = await import("firebase/auth");
+      const { auth } = await import("./firebase.js");
+      await sendPasswordResetEmail(auth, person.email);
+      setMsg((m) => ({ ...m, [person.email]: "✓ Reset email sent." }));
+    } catch (e) {
+      setMsg((m) => ({ ...m, [person.email]: "Failed: " + e.message }));
+    } finally { setBusy(null); }
+  };
+
+  if (loading) return <div className="card dim">Loading…</div>;
+
+  return (
+    <div className="card">
+      <h2 className="card-title">Staff Logins</h2>
+      <p className="dim" style={{ fontSize: "0.83rem", marginBottom: "1.25rem" }}>
+        Send a password reset email to any doctor or receptionist. They'll receive a link to set a new password.
+      </p>
+      {staff.length === 0 ? (
+        <div className="dim">No staff with logins yet. Assign roles in the Developer portal.</div>
+      ) : (
+        <div className="divide-list">
+          {staff.map((p) => (
+            <div key={p.email || p.name} className="divide-row">
+              <div>
+                <div className="fw-med">{p.name}</div>
+                <div className="dim" style={{ fontSize: "0.82rem" }}>
+                  {p.role} · {p.email || "No email"}
+                </div>
+                {msg[p.email] && (
+                  <div style={{ fontSize: "0.78rem", marginTop: "0.2rem", color: msg[p.email].startsWith("✓") ? "var(--green)" : "var(--red)" }}>
+                    {msg[p.email]}
+                  </div>
+                )}
+              </div>
+              <button className="btn btn-outline btn-sm" disabled={busy === p.email || !p.email}
+                onClick={() => sendReset(p)}>
+                {busy === p.email ? "Sending…" : "Send reset email"}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   ADMIN SETTINGS TAB — Branding, Schedule, Chime, Theme
+───────────────────────────────────────────── */
+function AdminSettingsTab({ state, setState }) {
+  const [section, setSection] = useState("branding");
+  const updateChime = async (patch) => {
+    await setState({ ...state, chime: { ...state.chime, ...patch } }, { role: "ADMIN", action: "chimeUpdate" });
+  };
+  const testChime = () => {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const vol = ctx.createGain(); vol.gain.value = state.chime?.volume ?? 0.22; vol.connect(ctx.destination);
+      const beep = (t, f) => { const o = ctx.createOscillator(); o.type = "sine"; o.frequency.value = f; o.connect(vol); o.start(t); o.stop(t + 0.14); };
+      const t0 = ctx.currentTime + 0.01; beep(t0, 880); beep(t0 + 0.22, 1046);
+    } catch {}
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+      <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+        {[["branding", "🎨 Branding"], ["schedule", "🕐 Schedule"], ["chime", "🔔 Chime"], ["theme", "🌓 Lobby Theme"]].map(([k, label]) => (
+          <button key={k} className={`tab-btn${section === k ? " active" : ""}`} onClick={() => setSection(k)}>{label}</button>
+        ))}
+      </div>
+
+      {section === "branding" && <BrandingTab />}
+      {section === "schedule" && <ScheduleTab state={state} setState={setState} />}
+
+      {section === "chime" && (
+        <div className="card">
+          <h2 className="card-title">Chime Settings</h2>
+          <div className="chime-grid">
+            <label className="toggle-row"><span>Enabled</span><input type="checkbox" checked={!!state.chime?.enabled} onChange={(e) => updateChime({ enabled: e.target.checked })} /></label>
+            <label className="toggle-row"><span>Do Not Disturb</span><input type="checkbox" checked={!!state.chime?.doNotDisturb} onChange={(e) => updateChime({ doNotDisturb: e.target.checked })} /></label>
+            <div className="field-group">
+              <label className="field-label">Volume — {Math.round((state.chime?.volume ?? 0.22) * 100)}%</label>
+              <input type="range" min="0" max="1" step="0.01" value={state.chime?.volume ?? 0.22} onChange={(e) => updateChime({ volume: parseFloat(e.target.value) })} style={{ width: "100%" }} />
+            </div>
+            <div className="field-group">
+              <label className="field-label">Quiet Hours</label>
+              <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                <input type="time" className="field-input" style={{ width: "auto" }} value={state.chime?.dndStart || "22:00"} onChange={(e) => updateChime({ dndStart: e.target.value })} />
+                <span className="dim">to</span>
+                <input type="time" className="field-input" style={{ width: "auto" }} value={state.chime?.dndEnd || "07:00"} onChange={(e) => updateChime({ dndEnd: e.target.value })} />
+              </div>
+            </div>
+            <div className="field-group">
+              <label className="field-label">Min gap between chimes (sec)</label>
+              <input type="number" className="field-input" style={{ width: "80px" }} min="0" max="30" value={state.chime?.minGapSec ?? 3} onChange={(e) => updateChime({ minGapSec: parseInt(e.target.value) || 0 })} />
+            </div>
+            <button className="btn btn-blue" onClick={testChime}>🔔 Test Chime</button>
+          </div>
+        </div>
+      )}
+
+      {section === "theme" && (
+        <div className="card">
+          <h2 className="card-title">Lobby Theme</h2>
+          <p className="dim" style={{ fontSize: "0.83rem", marginBottom: "1.25rem" }}>
+            Controls the lobby TV display. Dark is better for dedicated screens; light works in bright rooms.
+          </p>
+          <div style={{ display: "flex", gap: "1rem" }}>
+            {[["dark", "🌙 Dark", "Best for TV displays"], ["light", "☀️ Light", "Better for bright rooms"]].map(([val, label, desc]) => (
+              <div key={val}
+                onClick={() => setState({ ...state, lobbyTheme: val }, { role: "ADMIN", action: "setLobbyTheme", val })}
+                style={{
+                  flex: 1, padding: "1.25rem", border: `2px solid ${state.lobbyTheme === val ? "var(--blue)" : "var(--border)"}`,
+                  borderRadius: "12px", cursor: "pointer", background: state.lobbyTheme === val ? "#2563eb11" : "var(--surface)",
+                  transition: "all 0.15s",
+                }}>
+                <div style={{ fontSize: "1.5rem", marginBottom: "0.4rem" }}>{label.split(" ")[0]}</div>
+                <div style={{ fontWeight: 600 }}>{label.split(" ")[1]}</div>
+                <div className="dim" style={{ fontSize: "0.8rem" }}>{desc}</div>
+                {state.lobbyTheme === val && <div style={{ fontSize: "0.75rem", color: "var(--blue)", marginTop: "0.5rem", fontWeight: 600 }}>● Active</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1519,9 +1781,9 @@ function DeveloperPortal() {
         </div>
 
         <div className="tab-bar">
-          {["doctors","rooms","import","staff","patients","admins","credentials","chime","branding","schedule","analytics"].map((t) => (
+          {["doctors","rooms","import","staff","patients","admins","chime","branding","schedule","analytics"].map((t) => (
             <button key={t} className={`tab-btn${tab===t?" active":""}`} onClick={() => setTab(t)}>
-              {t==="doctors"?"👤 Doctors":t==="rooms"?"🏥 Rooms":t==="import"?"📥 Import":t==="staff"?"👥 Staff":t==="patients"?"🏥 Patients":t==="admins"?"🔐 Admins":t==="credentials"?"🔑 Credentials":t==="chime"?"🔔 Chime":t==="branding"?"🎨 Branding":t==="schedule"?"🕐 Schedule":"📊 Analytics"}
+              {t==="doctors"?"👤 Doctors":t==="rooms"?"🏥 Rooms":t==="import"?"📥 Import":t==="staff"?"👥 Staff":t==="patients"?"🏥 Patients":t==="admins"?"🔐 Admins":t==="chime"?"🔔 Chime":t==="branding"?"🎨 Branding":t==="schedule"?"🕐 Schedule":"📊 Analytics"}
             </button>
           ))}
         </div>
@@ -1533,6 +1795,14 @@ function DeveloperPortal() {
               <input className="field-input" placeholder="Full name" value={form.name} onChange={(e) => setForm({...form,name:e.target.value})} />
               <input className="field-input" placeholder="Specialty (optional)" value={form.specialty} onChange={(e) => setForm({...form,specialty:e.target.value})} />
               <button className="btn btn-green" onClick={addDoctor}>+ Add</button>
+              <button className="btn btn-outline" title="Sync emails from staff list into doctor directory" onClick={async () => {
+                try {
+                  const snap = await getDoc(STAFF_DOC);
+                  const people = snap.exists() ? (snap.data().people || []) : [];
+                  await rebuildDoctorDirectory(people, state, setState);
+                  alert(`✓ Doctor directory rebuilt from ${people.filter(p => p.role === "DOCTOR").length} staff doctors.`);
+                } catch (e) { alert("Rebuild failed: " + e.message); }
+              }}>↻ Rebuild from staff list</button>
             </div>
             {doctors.length === 0 && <div className="dim">No doctors added yet.</div>}
             <div className="divide-list">
@@ -1574,8 +1844,6 @@ function DeveloperPortal() {
           </div>
         )}
 
-        {tab === "credentials" && <CredentialsTab rooms={state.rooms||DEFAULT_ROOMS} />}
-
         {tab === "chime" && (
           <div className="card">
             <h2 className="card-title">Chime Settings</h2>
@@ -1605,7 +1873,7 @@ function DeveloperPortal() {
 
         {tab === "branding" && <BrandingTab />}
         {tab === "import" && <StaffImportTab state={state} setState={setState} />}
-        {tab === "staff" && <StaffDirectoryTab />}
+        {tab === "staff" && <StaffDirectoryTab state={state} setState={setState} />}
         {tab === "patients" && <PatientImportTab />}
         {tab === "admins" && <AdminEmailsTab state={state} setState={setState} />}
         {tab === "schedule" && <ScheduleTab state={state} setState={setState} />}
@@ -1618,7 +1886,37 @@ function DeveloperPortal() {
 /* ─────────────────────────────────────────────
    SHARED: load + role helpers for staff
 ───────────────────────────────────────────── */
-async function grantRole(person, role, staff, setStaff) {
+// Build a stable doctorDirectory from the staff list
+// Uses email as the stable key so it never drifts from the login system
+async function rebuildDoctorDirectory(people, state, setState) {
+  const dir = {};
+  people.filter((p) => p.role === "DOCTOR" && p.name).forEach((p) => {
+    // Use email-based key for stability; fallback to name-based
+    const key = p.email
+      ? "doc_" + p.email.replace(/[^a-zA-Z0-9]/g, "_")
+      : "doc_" + p.name.replace(/[^a-zA-Z0-9]/g, "_");
+    dir[key] = {
+      id: key,
+      name: p.name,
+      specialty: p.designation || "General",
+      idNumber: p.idNumber || "",
+      registrationNo: p.registrationNo || "",
+      email: p.email || "",
+      active: true,
+    };
+  });
+  // Merge with existing non-staff doctors (added manually, not from import)
+  const existing = state.doctorDirectory || {};
+  Object.values(existing).forEach((d) => {
+    if (!d.email || !people.find((p) => p.email === d.email)) {
+      // Keep manually added doctors that aren't in the staff list
+      if (!dir[d.id]) dir[d.id] = d;
+    }
+  });
+  await setState({ ...state, doctorDirectory: dir }, { role: "SYSTEM", action: "rebuildDoctorDirectory" });
+}
+
+async function grantRole(person, role, staff, setStaff, state, setState) {
   const createStaffAccount = httpsCallable(functions, "createStaffAccount");
   await createStaffAccount({ email: person.email, name: person.name, role });
   const merged = staff.map((p) =>
@@ -1626,9 +1924,11 @@ async function grantRole(person, role, staff, setStaff) {
   );
   await setDoc(STAFF_DOC, { people: merged });
   setStaff(merged);
+  // Rebuild doctorDirectory if granting DOCTOR role
+  if (role === "DOCTOR") await rebuildDoctorDirectory(merged, state, setState);
 }
 
-async function revokeRole(person, staff, setStaff) {
+async function revokeRole(person, staff, setStaff, state, setState) {
   const revoke = httpsCallable(functions, "revokeStaffAccount");
   await revoke({ email: person.email });
   const merged = staff.map((p) =>
@@ -1636,6 +1936,8 @@ async function revokeRole(person, staff, setStaff) {
   );
   await setDoc(STAFF_DOC, { people: merged });
   setStaff(merged);
+  // Rebuild if revoking a DOCTOR role
+  if (person.role === "DOCTOR") await rebuildDoctorDirectory(merged, state, setState);
 }
 
 /* ─────────────────────────────────────────────
@@ -1727,12 +2029,17 @@ function StaffImportTab({ state, setState }) {
           existing.specialty = d.designation;
           existing.idNumber = d.idNumber;
           existing.registrationNo = d.registrationNo;
+          existing.email = d.email || existing.email || "";
         } else {
           const id = `doc_${Math.random().toString(36).slice(2, 9)}`;
           dir[id] = { id, name: d.name, specialty: d.designation, idNumber: d.idNumber, registrationNo: d.registrationNo, email: d.email || "", active: true };
         }
       });
       await setState({ ...state, doctorDirectory: dir }, { role: "DEVELOPER", action: "staffImport", count: preview.length });
+      // Rebuild from staff list to ensure email-based IDs are used
+      const staffSnap = await getDoc(STAFF_DOC);
+      const allPeople = staffSnap.exists() ? (staffSnap.data().people || []) : [];
+      await rebuildDoctorDirectory(allPeople, { ...state, doctorDirectory: dir }, setState);
       setMsg(`✓ Imported ${preview.length} people (${doctors.length} doctors added to assignment directory). Manage roles in the Staff tab.`);
       setPreview(null);
     } catch (e) {
@@ -1788,7 +2095,7 @@ function StaffImportTab({ state, setState }) {
 /* ─────────────────────────────────────────────
    STAFF DIRECTORY TAB — search, filter, manage roles
 ───────────────────────────────────────────── */
-function StaffDirectoryTab() {
+function StaffDirectoryTab({ state, setState }) {
   const [staff, setStaff] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -1848,7 +2155,7 @@ function StaffDirectoryTab() {
     if (!person.email) { setMsg(`✕ ${person.name} has no email — cannot create a login.`); return; }
     setRoleBusy(person.email); setMsg("");
     try {
-      await grantRole(person, role, staff, setStaff);
+      await grantRole(person, role, staff, setStaff, state, setState);
       // Send the password-setup email via Firebase's built-in service
       try {
         const { sendPasswordResetEmail } = await import("firebase/auth");
@@ -1869,7 +2176,7 @@ function StaffDirectoryTab() {
     if (!window.confirm(`Revoke ${person.name}'s login access?`)) return;
     setRoleBusy(person.email); setMsg("");
     try {
-      await revokeRole(person, staff, setStaff);
+      await revokeRole(person, staff, setStaff, state, setState);
       setMsg(`✓ ${person.name}'s access revoked.`);
     } catch (e) {
       setMsg(`✕ Could not revoke: ${e.message}`);
@@ -1940,30 +2247,36 @@ function StaffDirectoryTab() {
 
         <div className="table-wrap">
           <table className="data-table">
-            <thead><tr><th>Name</th><th>Designation</th><th>ID / Reg</th><th>Email</th><th>Login</th><th>Manage</th></tr></thead>
+            <thead><tr><th>Name</th><th>Designation</th><th>Email</th><th>Login</th><th style={{ width: "160px" }}>Manage</th></tr></thead>
             <tbody>
               {filtered.length === 0 ? (
-                <tr><td colSpan={6} className="dim" style={{ textAlign: "center", padding: "1.5rem" }}>No matching people.</td></tr>
+                <tr><td colSpan={5} className="dim" style={{ textAlign: "center", padding: "1.5rem" }}>No matching people.</td></tr>
               ) : filtered.map((p, i) => (
                 <tr key={i}>
-                  <td style={{ fontWeight: 500 }}>{p.name}</td>
-                  <td>{p.designation}</td>
-                  <td className="mono" style={{ fontSize: "0.75rem" }}>{p.idNumber || "—"}{p.registrationNo ? ` / ${p.registrationNo}` : ""}</td>
+                  <td>
+                    <div style={{ fontWeight: 500 }}>{p.name}</div>
+                    <div className="dim" style={{ fontSize: "0.75rem" }}>{p.idNumber || ""}{p.registrationNo ? ` · ${p.registrationNo}` : ""}</div>
+                  </td>
+                  <td style={{ fontSize: "0.85rem" }}>{p.designation}</td>
                   <td className="dim" style={{ fontSize: "0.8rem" }}>{p.email || "—"}</td>
                   <td>{p.role
-                    ? <span className="status-pill" style={{ background: "#16a34a22", color: "#16a34a" }}>{p.role}</span>
+                    ? <span className="status-pill" style={{ background: "#16a34a22", color: "#16a34a", fontSize: "0.75rem" }}>{p.role}</span>
                     : <span className="dim" style={{ fontSize: "0.8rem" }}>None</span>}</td>
                   <td>
-                    <div style={{ display: "flex", gap: "0.3rem", alignItems: "center" }}>
-                      <select className="field-input" style={{ width: "auto", padding: "0.25rem 0.5rem", fontSize: "0.8rem" }}
-                        value={p.role || ""} disabled={roleBusy === p.email}
-                        onChange={(e) => e.target.value && assign(p, e.target.value)}>
-                        <option value="">{roleBusy === p.email ? "Working…" : "Grant role…"}</option>
-                        {roleOptions(p).map((r) => <option key={r} value={r}>{r}</option>)}
-                      </select>
-                      {p.role && <button className="btn btn-red btn-sm" disabled={roleBusy === p.email} onClick={() => revoke(p)}>Revoke</button>}
-                      <button className="btn btn-outline btn-sm" onClick={() => openEdit(p)} title="Edit details">Edit</button>
-                      <button className="btn btn-outline btn-sm" onClick={() => removePerson(p)} title="Remove from directory">✕</button>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+                      <div style={{ display: "flex", gap: "0.3rem" }}>
+                        <select className="field-input" style={{ flex: 1, padding: "0.2rem 0.4rem", fontSize: "0.75rem" }}
+                          value={p.role || ""} disabled={roleBusy === p.email}
+                          onChange={(e) => e.target.value && assign(p, e.target.value)}>
+                          <option value="">{roleBusy === p.email ? "…" : "Grant role"}</option>
+                          {roleOptions(p).map((r) => <option key={r} value={r}>{r}</option>)}
+                        </select>
+                      </div>
+                      <div style={{ display: "flex", gap: "0.3rem" }}>
+                        {p.role && <button className="btn btn-red btn-sm" style={{ fontSize: "0.72rem", padding: "0.2rem 0.4rem" }} disabled={roleBusy === p.email} onClick={() => revoke(p)}>Revoke</button>}
+                        <button className="btn btn-outline btn-sm" style={{ fontSize: "0.72rem", padding: "0.2rem 0.4rem" }} onClick={() => openEdit(p)}>Edit</button>
+                        <button className="btn btn-outline btn-sm" style={{ fontSize: "0.72rem", padding: "0.2rem 0.4rem" }} onClick={() => removePerson(p)}>✕</button>
+                      </div>
                     </div>
                   </td>
                 </tr>
@@ -2229,7 +2542,7 @@ function ReceptionPortal() {
   const assign = async (roomId, doctorId) => {
     const d = doctorId ? state.doctorDirectory[doctorId] : null;
     await setRoom(roomId, {
-      assigned: d ? { id: d.id, name: d.name, department: d.specialty || "General" } : null,
+      assigned: d ? { id: d.id, name: d.name, department: d.specialty || "General", email: d.email || "" } : null,
       status: "IDLE", sessions: null, nowServing: null, upNext: null, customCall: null,
     }, { role: "RECEPTION", action: "assignDoctor", roomId, doctorId });
   };
@@ -2250,15 +2563,13 @@ function ReceptionPortal() {
             <div className="portal-sub">Room assignment · Patients · Appointments</div>
           </div>
         </div>
-
         <div className="tab-bar">
-          {["appointments", "patients", "rooms"].map((t) => (
+          {["appointments", "active", "patients", "rooms"].map((t) => (
             <button key={t} className={`tab-btn${tab === t ? " active" : ""}`} onClick={() => setTab(t)}>
-              {t === "appointments" ? "📋 Appointments" : t === "patients" ? "👤 Patients" : "🏥 Rooms"}
+              {t === "appointments" ? "📋 Book Appointment" : t === "active" ? "📅 Active Appointments" : t === "patients" ? "👤 Patients" : "🏥 Rooms"}
             </button>
           ))}
         </div>
-
         {tab === "rooms" && (
           <div className="card">
             <h2 className="card-title">Assign Doctors to Rooms</h2>
@@ -2290,151 +2601,113 @@ function ReceptionPortal() {
             </div>
           </div>
         )}
-
         {tab === "patients" && <PatientRecordsTab />}
-        {tab === "appointments" && <AppointmentsTab state={state} />}
+        {tab === "appointments" && <BookAppointmentTab state={state} />}
+        {tab === "active" && <ActiveAppointmentsTab state={state} />}
       </div>
     </div>
   );
 }
 
 /* ─────────────────────────────────────────────
-   PATIENT RECORDS TAB — search / add / edit
+   PATIENT RECORDS TAB
 ───────────────────────────────────────────── */
 function PatientRecordsTab() {
-  const [search, setSearch] = useState("");
-  const [results, setResults] = useState([]);
-  const [searching, setSearching] = useState(false);
-  const [editing, setEditing] = useState(null);
-  const [isNew, setIsNew] = useState(false);
+  const [idInput, setIdInput] = useState("");
+  const [phase, setPhase] = useState("search"); // search | found | notfound | editing
+  const [patient, setPatient] = useState(null);
+  const [form, setForm] = useState({ idNumber: "", name: "", mobile: "", dob: "", sex: "", address: "", notes: "" });
   const [msg, setMsg] = useState("");
+  const [searching, setSearching] = useState(false);
 
-  const blank = { idNumber: "", name: "", mobile: "", dob: "", sex: "", address: "", notes: "" };
-
-  const doSearch = async () => {
-    const q = search.trim();
-    if (!q) return;
-    setSearching(true);
+  const lookup = async () => {
+    const id = idInput.trim();
+    if (!id) return;
+    setSearching(true); setMsg("");
     try {
-      // Search by ID (exact) or name (prefix)
-      const byId = await getDoc(doc(db, "clinicq_patients", q));
-      if (byId.exists()) {
-        setResults([{ id: byId.id, ...byId.data() }]);
+      const snap = await getDoc(doc(db, "clinicq_patients", id));
+      if (snap.exists()) {
+        const p = { id: snap.id, ...snap.data() };
+        setPatient(p);
+        setForm({ idNumber: p.idNumber || id, name: p.name || "", mobile: p.mobile || "", dob: p.dob || "", sex: p.sex || "", address: p.address || "", notes: p.notes || "" });
+        setPhase("found");
       } else {
-        // Name search — query by name field
-        const snap = await getDocs(query(PATIENTS_COL, where("name", ">=", q), where("name", "<=", q + "\uf8ff"), limit(20)));
-        setResults(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+        setForm({ idNumber: id, name: "", mobile: "", dob: "", sex: "", address: "", notes: "" });
+        setPhase("notfound");
       }
-    } catch (e) {
-      setMsg("Search failed: " + e.message);
-    } finally {
-      setSearching(false);
-    }
+    } catch (e) { setMsg("Lookup failed: " + e.message); }
+    finally { setSearching(false); }
   };
 
   const save = async () => {
-    const p = editing;
-    if (!p.name.trim() || !p.idNumber.trim()) { setMsg("Name and ID are required."); return; }
+    if (!form.name.trim()) { setMsg("Name is required."); return; }
     try {
-      await setDoc(doc(db, "clinicq_patients", p.idNumber.trim()), {
-        idNumber: p.idNumber.trim(),
-        name: p.name.trim(),
-        mobile: p.mobile.trim(),
-        dob: p.dob,
-        sex: p.sex,
-        address: p.address.trim(),
-        notes: p.notes.trim(),
+      await setDoc(doc(db, "clinicq_patients", form.idNumber.trim()), {
+        idNumber: form.idNumber.trim(), name: form.name.trim(), mobile: form.mobile.trim(),
+        dob: form.dob, sex: form.sex, address: form.address.trim(), notes: form.notes.trim(),
         updatedAt: Date.now(),
       }, { merge: true });
-      setMsg(`✓ ${p.name.trim()} ${isNew ? "added" : "updated"}.`);
-      setEditing(null);
-      if (!isNew) {
-        setResults((prev) => prev.map((r) => r.id === p.idNumber.trim() ? { ...r, ...p } : r));
-      }
-    } catch (e) {
-      setMsg("Save failed: " + e.message);
-    }
+      setMsg(`✓ ${form.name.trim()} ${phase === "notfound" ? "added" : "updated"}.`);
+      setPhase("found");
+      setPatient({ ...form });
+    } catch (e) { setMsg("Save failed: " + e.message); }
   };
 
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-      <div className="card">
-        <h2 className="card-title">Patient Records</h2>
-        <div className="add-row">
-          <input className="field-input" placeholder="Search by ID/Passport or name…"
-            value={search} onChange={(e) => setSearch(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && doSearch()} />
-          <button className="btn btn-blue" onClick={doSearch} disabled={searching}>{searching ? "Searching…" : "Search"}</button>
-          <button className="btn btn-green" onClick={() => { setEditing({ ...blank }); setIsNew(true); setMsg(""); }}>+ New Patient</button>
-        </div>
-        {msg && <div style={{ fontSize: "0.83rem", marginBottom: "0.75rem", color: msg.startsWith("✓") ? "var(--green)" : "var(--red)" }}>{msg}</div>}
-        {results.length > 0 && (
-          <div className="table-wrap">
-            <table className="data-table">
-              <thead><tr><th>ID</th><th>Name</th><th>DOB / Age</th><th>Mobile</th><th>Last visit</th><th></th></tr></thead>
-              <tbody>
-                {results.map((p) => (
-                  <tr key={p.id}>
-                    <td className="mono" style={{ fontSize: "0.8rem" }}>{p.idNumber}</td>
-                    <td style={{ fontWeight: 500 }}>{p.name}</td>
-                    <td className="dim">{p.dob ? `${p.dob} (${computeAge(p.dob)})` : p.age ? `Age ${p.age}` : "—"}</td>
-                    <td className="dim">{p.mobile || "—"}</td>
-                    <td className="dim" style={{ fontSize: "0.8rem" }}>{p.lastVisit || "—"}</td>
-                    <td><button className="btn btn-outline btn-sm" onClick={() => { setEditing({ ...blank, ...p }); setIsNew(false); setMsg(""); }}>Edit</button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-        {results.length === 0 && search && !searching && <div className="dim" style={{ marginTop: "0.5rem" }}>No results. Try a different ID or name.</div>}
-      </div>
+  const reset = () => { setIdInput(""); setPhase("search"); setPatient(null); setMsg(""); };
 
-      {editing && (
-        <div className="modal-overlay" onClick={() => setEditing(null)}>
-          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-            <h2 className="card-title">{isNew ? "Add New Patient" : "Edit Patient"}</h2>
-            <div className="field-group">
-              <label className="field-label">ID / Passport No *</label>
-              <input className="field-input" value={editing.idNumber} disabled={!isNew}
-                onChange={(e) => setEditing({ ...editing, idNumber: e.target.value })} />
+  return (
+    <div className="card">
+      <h2 className="card-title">Patient Records</h2>
+      {phase === "search" && (
+        <div>
+          <div className="add-row">
+            <input className="field-input" placeholder="Enter ID / Passport No" value={idInput}
+              onChange={(e) => setIdInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && lookup()} />
+            <button className="btn btn-blue" onClick={lookup} disabled={searching}>{searching ? "Searching…" : "Look up"}</button>
+          </div>
+          {msg && <div style={{ fontSize: "0.83rem", color: "var(--red)" }}>{msg}</div>}
+        </div>
+      )}
+
+      {phase === "found" && patient && (
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: "1.1rem" }}>{patient.name}</div>
+              <div className="dim" style={{ fontSize: "0.83rem" }}>{patient.idNumber} · {patient.dob ? `${patient.dob} (${computeAge(patient.dob)})` : patient.age ? `Age ${patient.age}` : ""} · {patient.sex || ""}</div>
+              <div className="dim" style={{ fontSize: "0.83rem" }}>{patient.mobile || ""} {patient.address ? `· ${patient.address}` : ""}</div>
             </div>
-            <div className="field-group">
-              <label className="field-label">Full Name *</label>
-              <input className="field-input" value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} />
+            <div className="btn-group">
+              <button className="btn btn-outline btn-sm" onClick={() => setPhase("editing")}>Edit</button>
+              <button className="btn btn-outline btn-sm" onClick={reset}>Search again</button>
             </div>
-            <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
-              <div className="field-group" style={{ flex: 1, minWidth: "130px" }}>
-                <label className="field-label">Mobile</label>
-                <input className="field-input" value={editing.mobile} onChange={(e) => setEditing({ ...editing, mobile: e.target.value })} />
-              </div>
-              <div className="field-group" style={{ flex: 1, minWidth: "130px" }}>
-                <label className="field-label">DOB {editing.dob ? `(age ${computeAge(editing.dob)})` : ""}</label>
-                <input type="date" className="field-input" value={editing.dob} onChange={(e) => setEditing({ ...editing, dob: e.target.value })} />
-              </div>
-              <div className="field-group" style={{ flex: "0 0 90px" }}>
-                <label className="field-label">Sex</label>
-                <select className="field-input" value={editing.sex} onChange={(e) => setEditing({ ...editing, sex: e.target.value })}>
-                  <option value="">—</option>
-                  <option value="M">Male</option>
-                  <option value="F">Female</option>
-                  <option value="Other">Other</option>
-                </select>
-              </div>
-            </div>
-            <div className="field-group">
-              <label className="field-label">Address</label>
-              <input className="field-input" value={editing.address} onChange={(e) => setEditing({ ...editing, address: e.target.value })} />
-            </div>
-            <div className="field-group">
-              <label className="field-label">Notes</label>
-              <input className="field-input" value={editing.notes} onChange={(e) => setEditing({ ...editing, notes: e.target.value })} placeholder="e.g. wheelchair, follow-up" />
-            </div>
-            {msg && <div style={{ fontSize: "0.83rem", marginBottom: "0.5rem", color: msg.startsWith("✓") ? "var(--green)" : "var(--red)" }}>{msg}</div>}
-            <div style={{ display: "flex", gap: "0.5rem" }}>
-              <button className="btn btn-green" onClick={save}>{isNew ? "Add patient" : "Save changes"}</button>
-              <button className="btn btn-outline" onClick={() => setEditing(null)}>Cancel</button>
-            </div>
+          </div>
+          {msg && <div style={{ fontSize: "0.83rem", color: msg.startsWith("✓") ? "var(--green)" : "var(--red)" }}>{msg}</div>}
+        </div>
+      )}
+
+      {phase === "notfound" && (
+        <div>
+          <div style={{ padding: "0.75rem", background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: "8px", marginBottom: "1rem", fontSize: "0.85rem" }}>
+            No patient found with ID <strong>{idInput}</strong>. Fill in details below to add them.
+          </div>
+          <PatientFormFields form={form} setForm={setForm} />
+          {msg && <div style={{ fontSize: "0.83rem", color: msg.startsWith("✓") ? "var(--green)" : "var(--red)", marginBottom: "0.5rem" }}>{msg}</div>}
+          <div className="btn-group">
+            <button className="btn btn-green" onClick={save}>Add patient</button>
+            <button className="btn btn-outline" onClick={reset}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {phase === "editing" && (
+        <div>
+          <PatientFormFields form={form} setForm={setForm} lockId />
+          {msg && <div style={{ fontSize: "0.83rem", color: msg.startsWith("✓") ? "var(--green)" : "var(--red)", marginBottom: "0.5rem" }}>{msg}</div>}
+          <div className="btn-group">
+            <button className="btn btn-green" onClick={save}>Save changes</button>
+            <button className="btn btn-outline" onClick={() => setPhase("found")}>Cancel</button>
           </div>
         </div>
       )}
@@ -2442,177 +2715,239 @@ function PatientRecordsTab() {
   );
 }
 
+function PatientFormFields({ form, setForm, lockId }) {
+  return (
+    <div>
+      <div className="field-group">
+        <label className="field-label">ID / Passport No *</label>
+        <input className="field-input" value={form.idNumber} disabled={lockId} onChange={(e) => setForm({ ...form, idNumber: e.target.value })} />
+      </div>
+      <div className="field-group">
+        <label className="field-label">Full Name *</label>
+        <input className="field-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+      </div>
+      <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
+        <div className="field-group" style={{ flex: 1, minWidth: "130px" }}>
+          <label className="field-label">Mobile</label>
+          <input className="field-input" value={form.mobile} onChange={(e) => setForm({ ...form, mobile: e.target.value })} />
+        </div>
+        <div className="field-group" style={{ flex: 1, minWidth: "130px" }}>
+          <label className="field-label">DOB {form.dob ? `(age ${computeAge(form.dob)})` : ""}</label>
+          <input type="date" className="field-input" value={form.dob} onChange={(e) => setForm({ ...form, dob: e.target.value })} />
+        </div>
+        <div className="field-group" style={{ flex: "0 0 90px" }}>
+          <label className="field-label">Sex</label>
+          <select className="field-input" value={form.sex} onChange={(e) => setForm({ ...form, sex: e.target.value })}>
+            <option value="">—</option>
+            <option value="M">Male</option>
+            <option value="F">Female</option>
+            <option value="Other">Other</option>
+          </select>
+        </div>
+      </div>
+      <div className="field-group">
+        <label className="field-label">Address</label>
+        <input className="field-input" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
+      </div>
+      <div className="field-group">
+        <label className="field-label">Notes</label>
+        <input className="field-input" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="e.g. wheelchair, follow-up" />
+      </div>
+    </div>
+  );
+}
+
 /* ─────────────────────────────────────────────
-   APPOINTMENTS TAB — book + view today
+   BOOK APPOINTMENT TAB — two-step: ID lookup → book
 ───────────────────────────────────────────── */
-function AppointmentsTab({ state }) {
-  const blank = { idNumber: "", name: "", mobile: "", dob: "", sex: "", address: "", notes: "" };
-  const [form, setForm] = useState(blank);
-  const [room, setRoom] = useState("");
+function BookAppointmentTab({ state }) {
+  const [idInput, setIdInput] = useState("");
+  const [phase, setPhase] = useState("lookup"); // lookup | newpatient | book
+  const [patientForm, setPatientForm] = useState({ idNumber: "", name: "", mobile: "", dob: "", sex: "", address: "", notes: "" });
+  const [doctorId, setDoctorId] = useState("");
   const [apptDate, setApptDate] = useState(new Date().toISOString().slice(0, 10));
   const [lookupMsg, setLookupMsg] = useState("");
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const [lastTicket, setLastTicket] = useState(null);
-  const [todayVisits, setTodayVisits] = useState([]);
-  const [viewDate, setViewDate] = useState(new Date().toISOString().slice(0, 10));
 
-  const assignedRooms = (state.rooms || []).filter((r) => state.assigned[r]);
+  const activeDoctors = Object.values(state.doctorDirectory || {}).filter((d) => d.active);
 
-  const loadVisits = async (date) => {
-    try {
-      const q = query(VISITS_COL, where("date", "==", date), limit(100));
-      const snap = await getDocs(q);
-      const visits = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      visits.sort((a, b) => (a.token || 0) - (b.token || 0));
-      setTodayVisits(visits);
-    } catch {}
+  // Find room for a doctor
+  const roomForDoctor = (docId) => {
+    const entry = Object.entries(state.assigned || {}).find(([, a]) => a?.id === docId);
+    return entry ? entry[0] : null;
   };
-  useEffect(() => { loadVisits(viewDate); }, [viewDate]);
 
   const lookup = async () => {
-    const id = form.idNumber.trim();
+    const id = idInput.trim();
     if (!id) return;
-    setLookupMsg("Searching…");
+    setLookupMsg("Searching…"); setMsg("");
     try {
       const snap = await getDoc(doc(db, "clinicq_patients", id));
       if (snap.exists()) {
         const p = snap.data();
-        setForm({ idNumber: id, name: p.name || "", mobile: p.mobile || "", dob: p.dob || "", sex: p.sex || "", address: p.address || "", notes: p.notes || "" });
-        setLookupMsg("✓ Returning patient — details loaded.");
+        setPatientForm({ idNumber: id, name: p.name || "", mobile: p.mobile || "", dob: p.dob || "", sex: p.sex || "", address: p.address || "", notes: p.notes || "" });
+        setLookupMsg(`✓ Returning patient — ${p.name}`);
+        setPhase("book");
       } else {
-        setLookupMsg("New patient — fill in details below.");
+        setPatientForm({ idNumber: id, name: "", mobile: "", dob: "", sex: "", address: "", notes: "" });
+        setLookupMsg("");
+        setPhase("newpatient");
       }
     } catch (e) { setLookupMsg("Lookup failed: " + e.message); }
   };
 
-  const book = async () => {
-    if (!form.name.trim()) { setMsg("✕ Name is required."); return; }
-    if (!form.idNumber.trim()) { setMsg("✕ ID/Passport is required."); return; }
-    if (!room) { setMsg("✕ Please select a doctor/room."); return; }
-    setBusy(true); setMsg("");
+  const saveNewAndProceed = async () => {
+    if (!patientForm.name.trim()) { setMsg("Name is required."); return; }
+    setBusy(true);
     try {
-      const id = form.idNumber.trim();
-      const now = Date.now();
-      // Upsert patient record
-      await setDoc(doc(db, "clinicq_patients", id), {
-        idNumber: id, name: form.name.trim(), mobile: form.mobile.trim(),
-        dob: form.dob, sex: form.sex, address: form.address.trim(),
-        notes: form.notes.trim(), lastVisit: apptDate, updatedAt: now,
+      await setDoc(doc(db, "clinicq_patients", patientForm.idNumber.trim()), {
+        ...patientForm, idNumber: patientForm.idNumber.trim(), updatedAt: Date.now(),
       }, { merge: true });
-      // Assign next token
-      const token = await nextTokenForRoom(room, apptDate);
-      const doctorName = state.assigned[room]?.name || "";
-      // Create visit/appointment
-      await addDoc(VISITS_COL, {
-        patientId: id, name: form.name.trim(), room, doctorName, token,
-        date: apptDate, status: "waiting", createdAt: now,
-      });
-      const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-      setLastTicket({ token, room, doctorName, name: form.name.trim(), date: apptDate, time: timeStr });
-      setMsg(`✓ ${form.name.trim()} booked — Token ${token} · ${roomDisplay(room)} · ${apptDate}`);
-      setForm(blank); setRoom(""); setLookupMsg("");
-      loadVisits(viewDate);
-    } catch (e) {
-      setMsg("Booking failed: " + e.message);
-    } finally { setBusy(false); }
+      setMsg("✓ Patient added.");
+      setPhase("book");
+    } catch (e) { setMsg("Save failed: " + e.message); }
+    finally { setBusy(false); }
   };
 
-  const printTicket = () => {
+  const book = async () => {
+    if (!doctorId) { setMsg("Please select a doctor."); return; }
+    const doctor = state.doctorDirectory[doctorId];
+    const room = roomForDoctor(doctorId) || "";  // room may not be assigned yet — that's ok
+    setBusy(true); setMsg("");
+    try {
+      const id = patientForm.idNumber.trim();
+      const now = Date.now();
+      await setDoc(doc(db, "clinicq_patients", id), {
+        ...patientForm, idNumber: id, lastVisit: apptDate, updatedAt: now,
+      }, { merge: true });
+      const token = await nextTokenForDoctor(doctorId, apptDate);
+      await addDoc(VISITS_COL, {
+        patientId: id, name: patientForm.name.trim(), room, doctorId,
+        doctorName: doctor.name, token, date: apptDate, status: "waiting", createdAt: now,
+      });
+      const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      setLastTicket({ token, room, doctorId, doctorName: doctor.name, name: patientForm.name.trim(), date: apptDate, time: timeStr });
+      setMsg(`✓ ${patientForm.name.trim()} booked — Token ${token} · ${doctor.name} · ${apptDate}`);
+      setIdInput(""); setPatientForm({ idNumber: "", name: "", mobile: "", dob: "", sex: "", address: "", notes: "" });
+      setDoctorId(""); setPhase("lookup"); setLookupMsg("");
+    } catch (e) { setMsg("Booking failed: " + e.message); }
+    finally { setBusy(false); }
+  };
+
+  const printTicket = async () => {
     if (!lastTicket) return;
     const t = lastTicket;
     const trackUrl = `${APP_URL}/#track?token=${t.token}&room=${t.room}&date=${t.date}`;
-    const w = window.open("", "_blank", "width=340,height=560");
+    const qrDataUrl = await generateQRDataURL(trackUrl);
+    const w = window.open("", "_blank", "width=320,height=500");
     w.document.write(`<html><head><title>Token ${t.token}</title>
-      <style>body{font-family:system-ui,sans-serif;text-align:center;padding:16px;max-width:300px;margin:0 auto}.clinic{font-size:15px;font-weight:700;margin-bottom:4px}.token{font-size:72px;font-weight:800;margin:8px 0;line-height:1}.row{font-size:13px;margin:4px 0}.label{color:#666;font-size:10px;text-transform:uppercase;letter-spacing:1px}hr{border:none;border-top:1px dashed #999;margin:10px 0}#qrcanvas{margin:0 auto;display:block}</style>
-      <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
-      </head><body>
-      <div class="clinic">${CLINIC_NAME}</div><hr/>
+      <style>
+        body{font-family:system-ui,sans-serif;text-align:center;padding:16px;max-width:280px;margin:0 auto;color:#000;background:#fff}
+        .clinic{font-size:14px;font-weight:700;margin-bottom:4px}
+        .token{font-size:80px;font-weight:900;margin:6px 0;line-height:1;color:#000}
+        .row{font-size:12px;margin:3px 0;color:#333}
+        .label{color:#888;font-size:9px;text-transform:uppercase;letter-spacing:1px}
+        hr{border:none;border-top:1px dashed #ccc;margin:8px 0}
+        img.qr{width:130px;height:130px;display:block;margin:8px auto}
+      </style></head><body>
+      <div class="clinic">${CLINIC_NAME}</div>
+      <hr/>
       <div class="label">Token Number</div>
       <div class="token">${t.token}</div>
-      <div class="row"><strong>${roomDisplay(t.room)}</strong>${t.doctorName ? " — " + t.doctorName : ""}</div>
-      <div class="row">${t.name}</div><hr/>
-      <div class="row">${t.date} · ${t.time}</div>
-      <canvas id="qrcanvas"></canvas>
-      <div class="label" style="margin-top:4px">Scan to track your position</div>
-      <script>QRCode.toCanvas(document.getElementById('qrcanvas'),'${trackUrl}',{width:120,margin:1});setTimeout(()=>window.print(),800);</script>
+      <div class="row"><strong>${t.doctorName || roomDisplay(t.room)}</strong></div>
+      <div class="row">${t.date} &middot; ${t.time}</div>
+      <hr/>
+      ${qrDataUrl ? `<img class="qr" src="${qrDataUrl}" alt="QR"/>` : ""}
+      <div class="label">Scan to track your queue position</div>
+      <script>setTimeout(()=>window.print(),300);</script>
       </body></html>`);
     w.document.close(); w.focus();
   };
 
-  const cancelVisit = async (visitId) => {
-    if (!window.confirm("Cancel this appointment?")) return;
-    try {
-      await setDoc(doc(db, "clinicq_visits", visitId), { status: "cancelled" }, { merge: true });
-      loadVisits(viewDate);
-    } catch (e) { alert("Failed: " + e.message); }
-  };
-
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-      {/* Booking form */}
       <div className="card">
         <h2 className="card-title">Book Appointment</h2>
+
+        {/* Step 1: ID lookup */}
         <div className="field-group">
-          <label className="field-label">ID / Passport No *</label>
+          <label className="field-label">Step 1 — Patient ID / Passport</label>
           <div style={{ display: "flex", gap: "0.5rem" }}>
-            <input className="field-input" value={form.idNumber}
-              onChange={(e) => setForm({ ...form, idNumber: e.target.value })}
-              onBlur={lookup} placeholder="Enter ID then Tab to look up" />
-            <button className="btn btn-outline" onClick={lookup}>Look up</button>
+            <input className="field-input" placeholder="Enter ID then press Look up" value={idInput}
+              onChange={(e) => setIdInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && lookup()}
+              disabled={phase !== "lookup"} />
+            {phase === "lookup"
+              ? <button className="btn btn-blue" onClick={lookup}>Look up</button>
+              : <button className="btn btn-outline" onClick={() => { setPhase("lookup"); setIdInput(""); setMsg(""); setLookupMsg(""); }}>Change</button>
+            }
           </div>
           {lookupMsg && <div style={{ fontSize: "0.8rem", marginTop: "0.4rem", color: lookupMsg.startsWith("✓") ? "var(--green)" : "var(--text-dim)" }}>{lookupMsg}</div>}
         </div>
-        <div className="field-group">
-          <label className="field-label">Full Name *</label>
-          <input className="field-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-        </div>
-        <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
-          <div className="field-group" style={{ flex: 1, minWidth: "130px" }}>
-            <label className="field-label">Mobile</label>
-            <input className="field-input" value={form.mobile} onChange={(e) => setForm({ ...form, mobile: e.target.value })} />
+
+        {/* New patient form */}
+        {phase === "newpatient" && (
+          <div style={{ padding: "1rem", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: "8px", marginBottom: "0.75rem" }}>
+            <div style={{ fontWeight: 600, marginBottom: "0.75rem", fontSize: "0.9rem" }}>New patient — fill in details</div>
+            <PatientFormFields form={patientForm} setForm={setPatientForm} lockId />
+            <div className="btn-group" style={{ marginTop: "0.5rem" }}>
+              <button className="btn btn-green" onClick={saveNewAndProceed} disabled={busy}>{busy ? "Saving…" : "Save & continue to booking"}</button>
+            </div>
           </div>
-          <div className="field-group" style={{ flex: 1, minWidth: "130px" }}>
-            <label className="field-label">DOB {form.dob ? `(age ${computeAge(form.dob)})` : ""}</label>
-            <input type="date" className="field-input" value={form.dob} onChange={(e) => setForm({ ...form, dob: e.target.value })} />
+        )}
+
+        {/* Step 2: Book */}
+        {phase === "book" && (
+          <div>
+            <div style={{ padding: "0.75rem", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: "8px", marginBottom: "1rem", fontSize: "0.85rem" }}>
+              <strong>{patientForm.name}</strong> · {patientForm.idNumber}
+              {patientForm.dob && ` · Age ${computeAge(patientForm.dob)}`}
+              {patientForm.mobile && ` · ${patientForm.mobile}`}
+            </div>
+            <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
+              <div className="field-group" style={{ flex: 1, minWidth: "200px" }}>
+                <label className="field-label">Step 2 — Select Doctor *</label>
+                <select className="field-input" value={doctorId} onChange={(e) => setDoctorId(e.target.value)}>
+                  <option value="">— Select doctor —</option>
+                  {activeDoctors.map((d) => {
+                    const room = roomForDoctor(d.id);
+                    return (
+                      <option key={d.id} value={d.id}>
+                        {d.name} ({d.specialty || "General"}){room ? ` · ${roomDisplay(room)}` : " · Not assigned"}
+                      </option>
+                    );
+                  })}
+                </select>
+                {doctorId && !roomForDoctor(doctorId) && (
+                  <div style={{ fontSize: "0.78rem", color: "var(--yellow)", marginTop: "0.3rem" }}>
+                    Room not yet assigned — token will be reserved for this doctor.
+                  </div>
+                )}
+              </div>
+              <div className="field-group" style={{ flex: "0 0 160px" }}>
+                <label className="field-label">Appointment Date</label>
+                <input type="date" className="field-input" value={apptDate} onChange={(e) => setApptDate(e.target.value)} />
+              </div>
+            </div>
           </div>
-          <div className="field-group" style={{ flex: "0 0 90px" }}>
-            <label className="field-label">Sex</label>
-            <select className="field-input" value={form.sex} onChange={(e) => setForm({ ...form, sex: e.target.value })}>
-              <option value="">—</option>
-              <option value="M">Male</option>
-              <option value="F">Female</option>
-              <option value="Other">Other</option>
-            </select>
-          </div>
-        </div>
-        <div className="field-group">
-          <label className="field-label">Notes</label>
-          <input className="field-input" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="e.g. follow-up, wheelchair" />
-        </div>
-        <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
-          <div className="field-group" style={{ flex: 1, minWidth: "160px" }}>
-            <label className="field-label">Doctor / Room *</label>
-            <select className="field-input" value={room} onChange={(e) => setRoom(e.target.value)}>
-              <option value="">— Select —</option>
-              {assignedRooms.map((r) => (
-                <option key={r} value={r}>{roomDisplay(r)} — {state.assigned[r]?.name}</option>
-              ))}
-            </select>
-          </div>
-          <div className="field-group" style={{ flex: "0 0 160px" }}>
-            <label className="field-label">Appointment Date</label>
-            <input type="date" className="field-input" value={apptDate} onChange={(e) => setApptDate(e.target.value)} />
-          </div>
-        </div>
+        )}
+
         {msg && <div style={{ fontSize: "0.85rem", marginBottom: "0.75rem", color: msg.startsWith("✓") ? "var(--green)" : "var(--red)" }}>{msg}</div>}
-        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
-          <button className="btn btn-green" onClick={book} disabled={busy}>{busy ? "Booking…" : "Book & assign token"}</button>
-          {lastTicket && <button className="btn btn-blue" onClick={printTicket}>🖨 Print token {lastTicket.token}</button>}
-        </div>
+
+        {phase === "book" && (
+          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+            <button className="btn btn-green" onClick={book} disabled={busy || !doctorId}>
+              {busy ? "Booking…" : "Book & assign token"}
+            </button>
+            {lastTicket && <button className="btn btn-blue" onClick={printTicket}>🖨 Print token {lastTicket.token}</button>}
+          </div>
+        )}
+
         {lastTicket && (
           <div style={{ marginTop: "1rem", padding: "1rem", background: "var(--bg)", borderRadius: "10px", display: "flex", alignItems: "center", gap: "1.25rem" }}>
-            <LobbyQR url={`${APP_URL}/#track?token=${lastTicket.token}&room=${lastTicket.room}&date=${lastTicket.date}`} />
+            <LobbyQR url={`${APP_URL}/#track?token=${lastTicket.token}&room=${lastTicket.room}&date=${lastTicket.date}`} dark={false} />
             <div>
               <div style={{ fontWeight: 700 }}>Token {lastTicket.token}</div>
               <div style={{ fontSize: "0.85rem", color: "var(--text-dim)" }}>{roomDisplay(lastTicket.room)} · {lastTicket.doctorName}</div>
@@ -2621,42 +2956,128 @@ function AppointmentsTab({ state }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
 
-      {/* Today's appointments */}
-      <div className="card">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem", flexWrap: "wrap", gap: "0.5rem" }}>
-          <h2 className="card-title" style={{ margin: 0 }}>Appointments</h2>
-          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-            <input type="date" className="field-input" style={{ width: "auto" }} value={viewDate} onChange={(e) => setViewDate(e.target.value)} />
-            <button className="btn btn-outline btn-sm" onClick={() => loadVisits(viewDate)}>↻</button>
-          </div>
+/* ─────────────────────────────────────────────
+   ACTIVE APPOINTMENTS TAB
+───────────────────────────────────────────── */
+function ActiveAppointmentsTab({ state }) {
+  const [visits, setVisits] = useState([]);
+  const [viewDate, setViewDate] = useState(new Date().toISOString().slice(0, 10));
+  const [filterDoctor, setFilterDoctor] = useState("");
+  const activeDoctors = Object.values(state.doctorDirectory || {}).filter((d) => d.active);
+
+  const load = async () => {
+    try {
+      const q = query(VISITS_COL, where("date", "==", viewDate), limit(200));
+      const snap = await getDocs(q);
+      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      list.sort((a, b) => {
+        if (a.room !== b.room) return a.room.localeCompare(b.room);
+        return (a.token || 0) - (b.token || 0);
+      });
+      setVisits(list);
+    } catch {}
+  };
+  useEffect(() => { load(); }, [viewDate]);
+
+  const cancel = async (id) => {
+    if (!window.confirm("Cancel this appointment?")) return;
+    await setDoc(doc(db, "clinicq_visits", id), { status: "cancelled" }, { merge: true });
+    load();
+  };
+
+  const reprint = async (v) => {
+    const trackUrl = `${APP_URL}/#track?token=${v.token}&room=${v.room}&date=${v.date}`;
+    const time = new Date(v.createdAt || Date.now()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const qrDataUrl = await generateQRDataURL(trackUrl);
+    const w = window.open("", "_blank", "width=320,height=500");
+    w.document.write(`<html><head><title>Token ${v.token}</title>
+      <style>
+        body{font-family:system-ui,sans-serif;text-align:center;padding:16px;max-width:280px;margin:0 auto;color:#000;background:#fff}
+        .clinic{font-size:14px;font-weight:700;margin-bottom:4px}
+        .token{font-size:80px;font-weight:900;margin:6px 0;line-height:1;color:#000}
+        .row{font-size:12px;margin:3px 0;color:#333}
+        .label{color:#888;font-size:9px;text-transform:uppercase;letter-spacing:1px}
+        hr{border:none;border-top:1px dashed #ccc;margin:8px 0}
+        img.qr{width:130px;height:130px;display:block;margin:8px auto}
+      </style></head><body>
+      <div class="clinic">${CLINIC_NAME}</div>
+      <hr/>
+      <div class="label">Token Number</div>
+      <div class="token">${v.token}</div>
+      <div class="row"><strong>${v.doctorName || roomDisplay(v.room)}</strong></div>
+      <div class="row">${v.date} &middot; ${time}</div>
+      <hr/>
+      ${qrDataUrl ? `<img class="qr" src="${qrDataUrl}" alt="QR"/>` : ""}
+      <div class="label">Scan to track your queue position</div>
+      <script>setTimeout(()=>window.print(),300);</script>
+      </body></html>`);
+    w.document.close(); w.focus();
+  };
+
+  const filtered = filterDoctor ? visits.filter((v) => v.doctorId === filterDoctor || v.doctorName === filterDoctor) : visits;
+  const waiting = filtered.filter((v) => v.status === "waiting").length;
+  const served = filtered.filter((v) => v.status === "served").length;
+  const cancelled = filtered.filter((v) => v.status === "cancelled" || v.status === "cleared").length;
+
+  return (
+    <div className="card">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem", flexWrap: "wrap", gap: "0.5rem" }}>
+        <h2 className="card-title" style={{ margin: 0 }}>Appointments</h2>
+        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+          <input type="date" className="field-input" style={{ width: "auto" }} value={viewDate} onChange={(e) => setViewDate(e.target.value)} />
+          <select className="field-input" style={{ width: "auto" }} value={filterDoctor} onChange={(e) => setFilterDoctor(e.target.value)}>
+            <option value="">All doctors</option>
+            {activeDoctors.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+          </select>
+          <button className="btn btn-outline btn-sm" onClick={load}>↻</button>
         </div>
-        {todayVisits.length === 0
-          ? <div className="dim">No appointments for this date.</div>
-          : (
-            <div className="table-wrap">
-              <table className="data-table">
-                <thead><tr><th>#</th><th>Patient</th><th>Room</th><th>Doctor</th><th>Status</th><th></th></tr></thead>
-                <tbody>
-                  {todayVisits.map((v) => (
-                    <tr key={v.id} style={{ opacity: v.status === "cancelled" ? 0.4 : 1 }}>
-                      <td style={{ fontWeight: 700 }}>{v.token}</td>
-                      <td>{v.name}</td>
-                      <td className="mono">{roomDisplay(v.room)}</td>
-                      <td>{v.doctorName || "—"}</td>
-                      <td><span className="status-pill" style={{ background: v.status === "served" ? "#64748b22" : v.status === "cancelled" ? "#ef444422" : "#16a34a22", color: v.status === "served" ? "#64748b" : v.status === "cancelled" ? "#ef4444" : "#16a34a" }}>{v.status}</span></td>
-                      <td>
-                        {v.status === "waiting" && (
-                          <button className="btn btn-outline btn-sm" onClick={() => cancelVisit(v.id)}>Cancel</button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
       </div>
+
+      <div style={{ display: "flex", gap: "1rem", marginBottom: "1rem", flexWrap: "wrap" }}>
+        {[["Waiting", waiting, "#16a34a"], ["Served", served, "#64748b"], ["Cancelled/Cleared", cancelled, "#ef4444"]].map(([label, count, color]) => (
+          <div key={label} style={{ padding: "0.5rem 0.75rem", background: color + "11", borderRadius: "8px", fontSize: "0.83rem" }}>
+            <span style={{ color, fontWeight: 600 }}>{count}</span> <span className="dim">{label}</span>
+          </div>
+        ))}
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="dim">No appointments for this date.</div>
+      ) : (
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead><tr><th>#</th><th>Patient</th><th>Doctor</th><th>Room</th><th>Status</th><th></th></tr></thead>
+            <tbody>
+              {filtered.map((v) => (
+                <tr key={v.id} style={{ opacity: v.status === "cancelled" || v.status === "cleared" ? 0.45 : 1 }}>
+                  <td style={{ fontWeight: 700 }}>{v.token}</td>
+                  <td>{v.name}</td>
+                  <td>{v.doctorName || "—"}</td>
+                  <td className="mono">{roomDisplay(v.room)}</td>
+                  <td>
+                    <span className="status-pill" style={{
+                      background: v.status === "served" ? "#64748b22" : v.status === "cancelled" || v.status === "cleared" ? "#ef444422" : "#16a34a22",
+                      color: v.status === "served" ? "#64748b" : v.status === "cancelled" || v.status === "cleared" ? "#ef4444" : "#16a34a",
+                    }}>{v.status}</span>
+                  </td>
+                  <td>
+                    <div style={{ display: "flex", gap: "0.3rem" }}>
+                      <button className="btn btn-outline btn-sm" onClick={() => reprint(v)} title="Reprint token">🖨</button>
+                      {v.status === "waiting" && (
+                        <button className="btn btn-outline btn-sm" onClick={() => cancel(v.id)}>Cancel</button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -2678,6 +3099,28 @@ function computeAge(dob) {
 }
 
 // Next token for a room today = highest existing today + 1
+// Generate QR code as a base64 data URL — no CDN needed in print window
+async function generateQRDataURL(url) {
+  try {
+    const QRCode = await import("https://esm.sh/qrcode@1.5.3");
+    return await QRCode.toDataURL(url, {
+      width: 160, margin: 2,
+      color: { dark: "#000000", light: "#ffffff" },
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function nextTokenForDoctor(doctorId, date) {
+  const d = date || new Date().toISOString().slice(0, 10);
+  const q = query(VISITS_COL, where("doctorId", "==", doctorId), where("date", "==", d));
+  const snap = await getDocs(q);
+  let max = 0;
+  snap.forEach((doc) => { const t = doc.data().token || 0; if (t > max) max = t; });
+  return max + 1;
+}
+
 async function nextTokenForRoom(room, date) {
   const d = date || new Date().toISOString().slice(0, 10);
   const q = query(VISITS_COL, where("room", "==", room), where("date", "==", d));
@@ -2938,47 +3381,33 @@ function PatientRegistration({ state }) {
     }
   };
 
-  const printTicket = () => {
+  const printTicket = async () => {
     if (!lastTicket) return;
     const t = lastTicket;
     const trackUrl = `${APP_URL}/#track?token=${t.token}&room=${t.room}&date=${t.date}`;
-    const w = window.open("", "_blank", "width=340,height=560");
-    w.document.write(`
-      <html><head><title>Token ${t.token}</title>
+    const qrDataUrl = await generateQRDataURL(trackUrl);
+    const w = window.open("", "_blank", "width=320,height=500");
+    w.document.write(`<html><head><title>Token ${t.token}</title>
       <style>
-        body { font-family: system-ui, sans-serif; text-align: center; padding: 16px; max-width: 300px; margin: 0 auto; }
-        .clinic { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
-        .token { font-size: 72px; font-weight: 800; margin: 8px 0; line-height: 1; }
-        .row { font-size: 13px; margin: 4px 0; }
-        .label { color: #666; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
-        hr { border: none; border-top: 1px dashed #999; margin: 10px 0; }
-        .qr-section { margin-top: 10px; }
-        .qr-hint { font-size: 10px; color: #888; margin-top: 4px; }
-        #qrcanvas { margin: 0 auto; display: block; }
-      </style>
-      <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
-      </head><body>
-        <div class="clinic">${CLINIC_NAME}</div>
-        <hr/>
-        <div class="label">Token Number</div>
-        <div class="token">${t.token}</div>
-        <div class="row"><strong>${roomDisplay(t.room)}</strong>${t.doctorName ? " — " + t.doctorName : ""}</div>
-        <div class="row">${t.name}</div>
-        <hr/>
-        <div class="row">${t.date} · ${t.time}</div>
-        <div class="qr-section">
-          <canvas id="qrcanvas"></canvas>
-          <div class="qr-hint">Scan to track your queue position</div>
-        </div>
-        <script>
-          QRCode.toCanvas(document.getElementById('qrcanvas'), '${trackUrl}', {
-            width: 120, margin: 1,
-            color: { dark: '#000000', light: '#ffffff' }
-          });
-          setTimeout(() => window.print(), 800);
-        </script>
-      </body></html>
-    `);
+        body{font-family:system-ui,sans-serif;text-align:center;padding:16px;max-width:280px;margin:0 auto;color:#000;background:#fff}
+        .clinic{font-size:14px;font-weight:700;margin-bottom:4px}
+        .token{font-size:80px;font-weight:900;margin:6px 0;line-height:1;color:#000}
+        .row{font-size:12px;margin:3px 0;color:#333}
+        .label{color:#888;font-size:9px;text-transform:uppercase;letter-spacing:1px}
+        hr{border:none;border-top:1px dashed #ccc;margin:8px 0}
+        img.qr{width:130px;height:130px;display:block;margin:8px auto}
+      </style></head><body>
+      <div class="clinic">${CLINIC_NAME}</div>
+      <hr/>
+      <div class="label">Token Number</div>
+      <div class="token">${t.token}</div>
+      <div class="row"><strong>${t.doctorName || roomDisplay(t.room)}</strong></div>
+      <div class="row">${t.date} &middot; ${t.time}</div>
+      <hr/>
+      ${qrDataUrl ? `<img class="qr" src="${qrDataUrl}" alt="QR"/>` : ""}
+      <div class="label">Scan to track your queue position</div>
+      <script>setTimeout(()=>window.print(),300);</script>
+      </body></html>`);
     w.document.close();
     w.focus();
   };
@@ -3057,7 +3486,7 @@ function PatientRegistration({ state }) {
           <div style={{ marginTop: "1rem", padding: "1rem", background: "var(--bg)", borderRadius: "10px", display: "flex", alignItems: "center", gap: "1.25rem" }}>
             <div>
               <div style={{ fontSize: "0.75rem", color: "var(--text-dim)", marginBottom: "0.25rem" }}>Patient tracking QR</div>
-              <LobbyQR url={`${APP_URL}/#track?token=${lastTicket.token}&room=${lastTicket.room}&date=${lastTicket.date}`} />
+              <LobbyQR url={`${APP_URL}/#track?token=${lastTicket.token}&room=${lastTicket.room}&date=${lastTicket.date}`} dark={false} />
             </div>
             <div>
               <div style={{ fontWeight: 700, fontSize: "1.1rem" }}>Token {lastTicket.token}</div>
