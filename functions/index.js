@@ -51,6 +51,14 @@ exports.createStaffAccount = onCall({ invoker: "public" }, async (request) => {
     // Reuse existing account if present, else create one with a random temp password
     try {
       user = await admin.auth().getUserByEmail(email);
+      // Re-enable if previously disabled and reset password to invalidate old reset links
+      if (user.disabled) {
+        await admin.auth().updateUser(user.uid, {
+          disabled: false,
+          displayName: name || user.displayName,
+          password: Math.random().toString(36).slice(2) + "Aa1!",
+        });
+      }
     } catch {
       user = await admin.auth().createUser({
         email,

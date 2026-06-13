@@ -899,8 +899,6 @@ function DoctorPortal({ room: roomProp }) {
   const { user } = useAuth();
 
   // ALL hooks must be declared before any early returns
-  const [debugInfo, setDebugInfo] = useState("");
-  const [manualRoom, setManualRoom] = useState(sessionStorage.getItem("cq_doctor_room") || null);
   const [patients, setPatients] = useState([]);
   const play = useChime(state.chime);
   const today = new Date().toISOString().slice(0, 10);
@@ -909,8 +907,6 @@ function DoctorPortal({ room: roomProp }) {
   const room = (() => {
     if (roomProp) return roomProp;
     if (!user || !ready) return null;
-
-    if (manualRoom && (state.rooms || DEFAULT_ROOMS).includes(manualRoom)) return manualRoom;
 
     const allDoctors = Object.values(state.doctorDirectory || {});
     const allAssigned = Object.entries(state.assigned || {});
@@ -967,17 +963,39 @@ function DoctorPortal({ room: roomProp }) {
   const status = actualRoom ? (state.status[actualRoom] || "IDLE") : "IDLE";
   const session = actualRoom ? state.sessions[actualRoom] : null;
 
-  // Load today's patient list — always register this effect (hooks must not be conditional)
+  // Find this doctor's directory entry for queries
+  const doctorEntry = user?.email
+    ? Object.values(state.doctorDirectory || {}).find(
+        (d) => d.email && d.email.toLowerCase() === user.email.toLowerCase()
+      )
+    : null;
+  const myDoctorId = doctorEntry?.id || assigned?.id || null;
+
+  // Load today's patient list — query by doctorId OR doctorName to handle ID mismatches
   useEffect(() => {
-    if (!actualRoom) return;
-    const q = query(VISITS_COL, where("room", "==", actualRoom), where("date", "==", today));
-    const unsub = onSnapshot(q, (snap) => {
-      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    const docName = doctorEntry?.name || assigned?.name || null;
+    if (!myDoctorId && !docName) return;
+
+    // Try by doctorId first, fall back to doctorName
+    const q = myDoctorId
+      ? query(VISITS_COL, where("doctorId", "==", myDoctorId), where("date", "==", today))
+      : query(VISITS_COL, where("doctorName", "==", docName), where("date", "==", today));
+
+    const unsub = onSnapshot(q, async (snap) => {
+      let list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      // If doctorId query returned nothing, try by name
+      if (list.length === 0 && myDoctorId && docName) {
+        try {
+          const q2 = query(VISITS_COL, where("doctorName", "==", docName), where("date", "==", today));
+          const snap2 = await getDocs(q2);
+          list = snap2.docs.map((d) => ({ id: d.id, ...d.data() }));
+        } catch {}
+      }
       list.sort((a, b) => (a.token || 0) - (b.token || 0));
       setPatients(list);
     });
     return unsub;
-  }, [actualRoom, today]);
+  }, [myDoctorId, today]);
 
   if (!ready) {
     return (
@@ -1005,42 +1023,34 @@ function DoctorPortal({ room: roomProp }) {
               <div className="portal-sub">{user?.email}</div>
             </div>
           </div>
-          <div className="card" style={{ padding: "2rem" }}>
-            <div style={{ textAlign: "center", marginBottom: "1.5rem" }}>
-              <div style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>🏥</div>
-              <div style={{ fontWeight: 600, marginBottom: "0.5rem" }}>
-                {room === "__notassigned__" ? "Not assigned to a room yet" : "Select your room"}
-              </div>
-              <div className="dim" style={{ fontSize: "0.85rem" }}>
-                {room === "__notassigned__"
-                  ? "You are in the directory but not yet assigned to a room. Ask Reception to assign you, or select your room below."
-                  : "Your email was not found in the doctor directory. Select your room below, or ask the Developer to add your email to your directory entry."}
-              </div>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", maxWidth: "320px", margin: "0 auto" }}>
-              {(state.rooms || DEFAULT_ROOMS).map((r) => {
-                const a = state.assigned[r];
-                return (
-                  <button key={r} className="btn btn-outline"
-                    style={{ padding: "0.75rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}
-                    onClick={() => {
-                      sessionStorage.setItem("cq_doctor_room", r);
-                      setManualRoom(r);
-                    }}>
-                    <span className="fw-med">{roomDisplay(r)}</span>
-                    <span className="dim" style={{ fontSize: "0.82rem" }}>{a ? a.name : "Unassigned"}</span>
-                  </button>
-                );
-              })}
-            </div>
-            <div style={{ marginTop: "1.5rem", background: "var(--bg)", borderRadius: "8px", padding: "0.75rem", fontSize: "0.75rem" }}>
-              <div className="dim" style={{ marginBottom: "0.3rem" }}>Debug info (share with Developer if issues persist):</div>
-              <div className="mono" style={{ fontSize: "0.7rem" }}>Email: {user?.email || "(blank)"}</div>
-              <div className="mono" style={{ fontSize: "0.7rem" }}>UID: {user?.uid?.slice(0, 16)}…</div>
-              <div className="mono" style={{ fontSize: "0.7rem" }}>Display name: {user?.displayName || "(none)"}</div>
-              <div className="mono" style={{ fontSize: "0.7rem" }}>In directory: {matchedByEmail ? "Yes — " + matchedByEmail.name : "No match found"}</div>
-              <div className="mono" style={{ fontSize: "0.7rem" }}>Assigned rooms: {Object.entries(state.assigned || {}).filter(([,a]) => a).map(([r,a]) => `${r}:${a?.name}`).join(", ") || "none"}</div>
-            </div>
+          <div className="card" style={{ textAlign: "center", padding: "3rem" }}>
+            <div style={{ fontSize: "2.5rem", marginBottom: "1rem" }}>🏥</div>
+            {room === "__notassigned__" ? (
+              <>
+                <div style={{ fontWeight: 600, fontSize: "1.1rem", marginBottom: "0.5rem" }}>
+                  No room assigned yet
+                </div>
+                <div className="dim" style={{ fontSize: "0.85rem" }}>
+                  Please ask Reception to assign you to a room for today.
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ fontWeight: 600, fontSize: "1.1rem", marginBottom: "0.5rem" }}>
+                  Account not linked
+                </div>
+                <div className="dim" style={{ fontSize: "0.85rem", marginBottom: "1.5rem" }}>
+                  Your account isn't linked to the doctor directory yet. Ask the Developer to rebuild the doctor directory from the Staff tab.
+                </div>
+                <div style={{ background: "var(--bg)", borderRadius: "8px", padding: "0.75rem", fontSize: "0.75rem", textAlign: "left", maxWidth: "320px", margin: "0 auto" }}>
+                  <div className="dim" style={{ marginBottom: "0.3rem" }}>Debug info for Developer:</div>
+                  <div className="mono" style={{ fontSize: "0.7rem" }}>Email: {user?.email || "(blank)"}</div>
+                  <div className="mono" style={{ fontSize: "0.7rem" }}>UID: {user?.uid?.slice(0, 16)}…</div>
+                  <div className="mono" style={{ fontSize: "0.7rem" }}>In directory: {matchedByEmail ? "Yes — " + matchedByEmail.name : "No"}</div>
+                  <div className="mono" style={{ fontSize: "0.7rem" }}>Assigned rooms: {Object.entries(state.assigned || {}).filter(([,a]) => a).map(([r,a]) => `${r}:${a?.name}`).join(", ") || "none"}</div>
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -1054,8 +1064,24 @@ function DoctorPortal({ room: roomProp }) {
     play(chimeType, { force: true });
   };
 
-  const startSession = () => {
-    const tokenStart = 1;
+  const startSession = async () => {
+    // Find the first waiting token for today to start from
+    let tokenStart = 1;
+    const docName = doctorEntry?.name || assigned?.name;
+    if (myDoctorId || docName) {
+      try {
+        const queries = [];
+        if (myDoctorId) queries.push(getDocs(query(VISITS_COL, where("doctorId", "==", myDoctorId), where("date", "==", today), where("status", "==", "waiting"))));
+        if (docName) queries.push(getDocs(query(VISITS_COL, where("doctorName", "==", docName), where("date", "==", today), where("status", "==", "waiting"))));
+        const snaps = await Promise.all(queries);
+        const tokens = [];
+        const seen = new Set();
+        snaps.forEach((snap) => snap.docs.forEach((d) => {
+          if (!seen.has(d.id)) { seen.add(d.id); const t = d.data().token; if (t) tokens.push(t); }
+        }));
+        if (tokens.length > 0) tokenStart = Math.min(...tokens);
+      } catch {}
+    }
     act({
       sessions: { startedAt: Date.now(), tokenStart, served: 0 },
       nowServing: tokenStart,
@@ -1066,7 +1092,7 @@ function DoctorPortal({ room: roomProp }) {
   };
 
   const endSession = async () => {
-    const sess = state.sessions[room];
+    const sess = state.sessions[actualRoom];
     const endedAt = Date.now();
     const today = new Date().toISOString().slice(0, 10);
     // Save completed session to history
@@ -1102,9 +1128,9 @@ function DoctorPortal({ room: roomProp }) {
   };
 
   const nextToken = () => {
-    const cur = state.nowServing[room] || 0;
+    const cur = state.nowServing[actualRoom] || 0;
     const next = cur + 1;
-    const sess = state.sessions[room];
+    const sess = state.sessions[actualRoom];
     act({
       nowServing: next,
       upNext: next + 1,
@@ -1115,7 +1141,7 @@ function DoctorPortal({ room: roomProp }) {
   };
 
   const prevToken = () => {
-    const cur = Math.max(1, (state.nowServing[room] || 1) - 1);
+    const cur = Math.max(1, (state.nowServing[actualRoom] || 1) - 1);
     act({
       nowServing: cur,
       upNext: cur + 1,
@@ -1192,12 +1218,6 @@ function DoctorPortal({ room: roomProp }) {
             <div className="status-pill" style={{ background: statusColor(status) + "22", color: statusColor(status) }}>
               {status}
             </div>
-            {manualRoom && (
-              <button className="btn btn-outline btn-sm" onClick={() => {
-                sessionStorage.removeItem("cq_doctor_room");
-                setManualRoom(null);
-              }}>Change Room</button>
-            )}
           </div>
         </div>
 
@@ -1247,7 +1267,23 @@ function DoctorPortal({ room: roomProp }) {
 
         {/* Today's patient list */}
         <div className="card" style={{ marginTop: "1rem" }}>
-          <h2 className="card-title">Today's Patients ({patients.filter(p => p.status !== "cancelled").length})</h2>
+          <h2 className="card-title">Today's Patients ({patients.filter(p => p.status !== "cancelled" && p.status !== "cleared").length})</h2>
+
+          {/* Now Serving card */}
+          {nowServing != null && (() => {
+            const current = patients.find((p) => p.token === nowServing);
+            return (
+              <div style={{ background: "#22c55e12", border: "1px solid #22c55e33", borderRadius: "12px", padding: "1rem 1.25rem", marginBottom: "1rem", display: "flex", alignItems: "center", gap: "1.25rem" }}>
+                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "3rem", fontWeight: 800, color: "#22c55e", lineHeight: 1, minWidth: "60px", textAlign: "center" }}>{nowServing}</div>
+                <div>
+                  <div style={{ fontSize: "0.7rem", fontWeight: 700, letterSpacing: "0.1em", color: "#22c55e", marginBottom: "0.2rem" }}>NOW SERVING</div>
+                  <div style={{ fontWeight: 600, fontSize: "1.05rem" }}>{current?.name || "—"}</div>
+                  <div className="dim" style={{ fontSize: "0.8rem" }}>{current?.patientId || ""}</div>
+                </div>
+              </div>
+            );
+          })()}
+
           {patients.length === 0 ? (
             <div className="dim">No appointments booked yet today.</div>
           ) : (
@@ -1261,19 +1297,15 @@ function DoctorPortal({ room: roomProp }) {
                     const isCurrent = p.token === nowServing;
                     const isNext = p.token === upNext;
                     const isServed = p.status === "served";
-                    const isCancelled = p.status === "cancelled";
+                    const isCancelled = p.status === "cancelled" || p.status === "cleared";
                     return (
                       <tr key={p.id} style={{
                         background: isCurrent ? "#22c55e12" : isNext ? "#3b82f612" : "transparent",
-                        opacity: isServed || isCancelled ? 0.45 : 1,
+                        opacity: isServed || isCancelled ? 0.4 : 1,
                       }}>
                         <td>
-                          <span style={{
-                            fontWeight: 700,
-                            fontSize: "1rem",
-                            color: isCurrent ? "#22c55e" : isNext ? "#3b82f6" : "inherit",
-                          }}>
-                            {p.token}
+                          <span style={{ fontWeight: 700, fontSize: "1rem", color: isCurrent ? "#22c55e" : isNext ? "#3b82f6" : "inherit" }}>
+                            {p.token ?? "—"}
                             {isCurrent && " ●"}
                           </span>
                         </td>
@@ -1281,10 +1313,10 @@ function DoctorPortal({ room: roomProp }) {
                         <td className="mono" style={{ fontSize: "0.8rem" }}>{p.patientId || "—"}</td>
                         <td>
                           <span className="status-pill" style={{
-                            background: isServed ? "#64748b22" : isCancelled ? "#ef444422" : isCurrent ? "#22c55e22" : "#64748b11",
-                            color: isServed ? "#64748b" : isCancelled ? "#ef4444" : isCurrent ? "#22c55e" : "var(--text-dim)",
+                            background: isServed ? "#64748b22" : isCancelled ? "#ef444422" : isCurrent ? "#22c55e22" : isNext ? "#3b82f622" : "#64748b11",
+                            color: isServed ? "#64748b" : isCancelled ? "#ef4444" : isCurrent ? "#22c55e" : isNext ? "#3b82f6" : "var(--text-dim)",
                           }}>
-                            {isServed ? "Served" : isCancelled ? "Cancelled" : isCurrent ? "Now" : isNext ? "Next" : "Waiting"}
+                            {isServed ? "✓ Served" : isCancelled ? "Cancelled" : isCurrent ? "Now" : isNext ? "Next" : "Waiting"}
                           </span>
                         </td>
                         <td>
@@ -2407,6 +2439,24 @@ function ReceptionPortal() {
       assigned: d ? { id: d.id, name: d.name, department: d.specialty || "General", email: d.email || "" } : null,
       status: "IDLE", sessions: null, nowServing: null, upNext: null, customCall: null,
     }, { role: "RECEPTION", action: "assignDoctor", roomId, doctorId });
+    // Update today's waiting visits for this doctor to set their room
+    if (d) {
+      const today = new Date().toISOString().slice(0, 10);
+      try {
+        const q1 = query(VISITS_COL, where("doctorId", "==", d.id), where("date", "==", today), where("status", "==", "waiting"));
+        const q2 = query(VISITS_COL, where("doctorName", "==", d.name), where("date", "==", today), where("status", "==", "waiting"));
+        const [snap1, snap2] = await Promise.all([getDocs(q1), getDocs(q2)]);
+        const seen = new Set();
+        const updates = [];
+        [...snap1.docs, ...snap2.docs].forEach((d) => {
+          if (!seen.has(d.id)) {
+            seen.add(d.id);
+            updates.push(setDoc(d.ref, { room: roomId }, { merge: true }));
+          }
+        });
+        await Promise.all(updates);
+      } catch (e) { console.warn("visit room update failed:", e.message); }
+    }
   };
 
   const endSession = async (roomId) => {
@@ -2919,7 +2969,18 @@ function ActiveAppointmentsTab({ state }) {
                   <td style={{ fontWeight: 700 }}>{v.token}</td>
                   <td>{v.name}</td>
                   <td>{v.doctorName || "—"}</td>
-                  <td className="mono">{roomDisplay(v.room)}</td>
+                  <td className="mono" style={{ fontSize: "0.85rem" }}>
+                    {(() => {
+                      if (v.room) return roomDisplay(v.room);
+                      // Look up doctor's current room from live state
+                      const assignedRoom = Object.entries(state.assigned || {}).find(
+                        ([, a]) => a && (a.id === v.doctorId || a.name === v.doctorName)
+                      );
+                      return assignedRoom
+                        ? <span style={{ color: "var(--blue)" }}>{roomDisplay(assignedRoom[0])}</span>
+                        : <span className="dim">Not assigned</span>;
+                    })()}
+                  </td>
                   <td>
                     <span className="status-pill" style={{
                       background: v.status === "served" ? "#64748b22" : v.status === "cancelled" || v.status === "cleared" ? "#ef444422" : "#16a34a22",
@@ -2976,7 +3037,12 @@ async function generateQRDataURL(url) {
 
 async function nextTokenForDoctor(doctorId, date) {
   const d = date || new Date().toISOString().slice(0, 10);
-  const q = query(VISITS_COL, where("doctorId", "==", doctorId), where("date", "==", d));
+  // Only count active visits (not cancelled/cleared) to avoid gaps from test/cancelled bookings
+  const q = query(VISITS_COL,
+    where("doctorId", "==", doctorId),
+    where("date", "==", d),
+    where("status", "in", ["waiting", "served"])
+  );
   const snap = await getDocs(q);
   let max = 0;
   snap.forEach((doc) => { const t = doc.data().token || 0; if (t > max) max = t; });
@@ -2985,7 +3051,11 @@ async function nextTokenForDoctor(doctorId, date) {
 
 async function nextTokenForRoom(room, date) {
   const d = date || new Date().toISOString().slice(0, 10);
-  const q = query(VISITS_COL, where("room", "==", room), where("date", "==", d));
+  const q = query(VISITS_COL,
+    where("room", "==", room),
+    where("date", "==", d),
+    where("status", "in", ["waiting", "served"])
+  );
   const snap = await getDocs(q);
   let max = 0;
   snap.forEach((doc) => { const t = doc.data().token || 0; if (t > max) max = t; });
