@@ -853,8 +853,8 @@ function AdminLoginPage() {
     setErr(""); setLoading(true);
     try {
       const r = await signInWithGoogle();
-      if (r?.redirecting) return; // redirect flow in progress
-      if (!r?.success) setErr(r?.error || "Access denied. Your account is not authorised.");
+      if (r?.redirecting) return;
+      if (!r?.success) setErr(r?.error || "Access denied. Make sure your Google account has been added as an Admin by the Developer.");
     } catch (e) {
       setErr(e.message);
     } finally {
@@ -898,36 +898,37 @@ function DoctorPortal({ room: roomProp }) {
   const { state, setRoom: setRoomState, ready } = useClinicState();
   const { user } = useAuth();
 
-  // Find which room this doctor is assigned to
+  // ALL hooks must be declared before any early returns
   const [debugInfo, setDebugInfo] = useState("");
   const [manualRoom, setManualRoom] = useState(sessionStorage.getItem("cq_doctor_room") || null);
+  const [patients, setPatients] = useState([]);
+  const play = useChime(state.chime);
+  const today = new Date().toISOString().slice(0, 10);
+
+  // Find which room this doctor is assigned to
   const room = (() => {
     if (roomProp) return roomProp;
     if (!user || !ready) return null;
 
-    // Check manually selected room first (doctor picked from list)
     if (manualRoom && (state.rooms || DEFAULT_ROOMS).includes(manualRoom)) return manualRoom;
 
     const allDoctors = Object.values(state.doctorDirectory || {});
     const allAssigned = Object.entries(state.assigned || {});
 
     // 1. Match by email in doctorDirectory
-    const byEmail = allDoctors.find(
-      (d) => d.email && d.email.toLowerCase() === user.email?.toLowerCase()
-    );
-    if (byEmail) {
-      const r = allAssigned.find(([, a]) => a?.id === byEmail.id);
-      if (r) return r[0];
-      // Found in directory but not assigned to a room
-      return "__notassigned__";
+    if (user.email) {
+      const byEmail = allDoctors.find((d) => d.email && d.email.toLowerCase() === user.email.toLowerCase());
+      if (byEmail) {
+        const r = allAssigned.find(([, a]) => a?.id === byEmail.id);
+        if (r) return r[0];
+        return "__notassigned__";
+      }
     }
 
-    // 2. Match by display name from Firebase Auth
+    // 2. Match by display name
     const displayName = user.displayName || "";
     if (displayName) {
-      const byName = allDoctors.find(
-        (d) => d.name && d.name.toLowerCase() === displayName.toLowerCase()
-      );
+      const byName = allDoctors.find((d) => d.name && d.name.toLowerCase() === displayName.toLowerCase());
       if (byName) {
         const r = allAssigned.find(([, a]) => a?.id === byName.id);
         if (r) return r[0];
@@ -935,22 +936,20 @@ function DoctorPortal({ room: roomProp }) {
       }
     }
 
-    // 3. Match by email stored in room assignment
-    const byAssigned = allAssigned.find(
-      ([, a]) => a?.email && a.email.toLowerCase() === user.email?.toLowerCase()
-    );
-    if (byAssigned) return byAssigned[0];
+    // 3. Match by email in room assignment
+    if (user.email) {
+      const byAssigned = allAssigned.find(([, a]) => a?.email && a.email.toLowerCase() === user.email.toLowerCase());
+      if (byAssigned) return byAssigned[0];
+    }
 
-    // 4. Match by UID stored in room assignment
+    // 4. Match by UID in room assignment
     const byUid = allAssigned.find(([, a]) => a?.uid && a.uid === user.uid);
     if (byUid) return byUid[0];
 
-    // 5. Match by email prefix vs doctor name (last resort)
-    const emailPrefix = user.email?.split("@")[0]?.toLowerCase().replace(/[^a-z]/g, "") || "";
+    // 5. Email prefix vs doctor name (last resort)
+    const emailPrefix = (user.email || "").split("@")[0]?.toLowerCase().replace(/[^a-z]/g, "") || "";
     if (emailPrefix.length > 3) {
-      const byPrefix = allDoctors.find(
-        (d) => d.name && d.name.toLowerCase().replace(/[^a-z]/g, "").includes(emailPrefix)
-      );
+      const byPrefix = allDoctors.find((d) => d.name && d.name.toLowerCase().replace(/[^a-z]/g, "").includes(emailPrefix));
       if (byPrefix) {
         const r = allAssigned.find(([, a]) => a?.id === byPrefix.id);
         if (r) return r[0];
@@ -960,14 +959,25 @@ function DoctorPortal({ room: roomProp }) {
 
     return null;
   })();
-  const actualRoom = (room && room !== "__notassigned__") ? room : null;
-  const play = useChime(state.chime);
 
+  const actualRoom = (room && room !== "__notassigned__") ? room : null;
   const assigned = actualRoom ? state.assigned[actualRoom] : null;
   const nowServing = actualRoom ? (state.customCall[actualRoom] ?? state.nowServing[actualRoom]) : null;
   const upNext = actualRoom ? state.upNext[actualRoom] : null;
   const status = actualRoom ? (state.status[actualRoom] || "IDLE") : "IDLE";
   const session = actualRoom ? state.sessions[actualRoom] : null;
+
+  // Load today's patient list — always register this effect (hooks must not be conditional)
+  useEffect(() => {
+    if (!actualRoom) return;
+    const q = query(VISITS_COL, where("room", "==", actualRoom), where("date", "==", today));
+    const unsub = onSnapshot(q, (snap) => {
+      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      list.sort((a, b) => (a.token || 0) - (b.token || 0));
+      setPatients(list);
+    });
+    return unsub;
+  }, [actualRoom, today]);
 
   if (!ready) {
     return (
@@ -1164,20 +1174,6 @@ function DoctorPortal({ room: roomProp }) {
     ? Math.round((Date.now() - session.startedAt) / 60000)
     : 0;
 
-  // Today's patient list for this room
-  const [patients, setPatients] = useState([]);
-  const today = new Date().toISOString().slice(0, 10);
-
-  useEffect(() => {
-    const q = query(VISITS_COL, where("room", "==", actualRoom), where("date", "==", today));
-    const unsub = onSnapshot(q, (snap) => {
-      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      list.sort((a, b) => (a.token || 0) - (b.token || 0));
-      setPatients(list);
-    });
-    return unsub;
-  }, [actualRoom, today]);
-
   const markServed = async (visitId) => {
     try {
       await setDoc(doc(db, "clinicq_visits", visitId), { status: "served" }, { merge: true });
@@ -1318,10 +1314,11 @@ function DoctorPortal({ room: roomProp }) {
 function AdminPortal() {
   const { state, setState, setRoom, ready } = useClinicState();
   const [tab, setTab] = useState("rooms");
-  const [form, setForm] = useState({ name: "", specialty: "" });
   const [newRoom, setNewRoom] = useState("");
   const [auditLog, setAuditLog] = useState([]);
   const [auditLoading, setAuditLoading] = useState(false);
+  const TABS = ["rooms", "stafflogins", "analytics", "audit", "settings"];
+  const TAB_LABELS = { rooms: "🏥 Rooms", stafflogins: "👥 Staff Logins", analytics: "📊 Analytics", audit: "📋 Audit", settings: "⚙️ Settings" };
 
   const activeDoctors = Object.values(state.doctorDirectory || {}).filter((d) => d.active);
 
@@ -1340,66 +1337,21 @@ function AdminPortal() {
     }, { role: "ADMIN", action: "endSession", roomId });
   };
 
-  const addDoctor = async () => {
-    const name = form.name.trim();
-    if (!name) return;
-    const id = `doc_${Date.now()}`;
-    const newDoc = { id, name, specialty: form.specialty.trim(), active: true };
-    await setState({ ...state, doctorDirectory: { ...state.doctorDirectory, [id]: newDoc } }, { role: "ADMIN", action: "doctorAdd", id });
-    // Sync to staff directory
-    try {
-      const snap = await getDoc(STAFF_DOC);
-      const people = snap.exists() ? (snap.data().people || []) : [];
-      if (!people.find((p) => p.name === name)) {
-        people.push({ name, designation: form.specialty.trim() || "Doctor", category: "doctor", idNumber: "", registrationNo: "", email: "", contact: "", role: null });
-        await setDoc(STAFF_DOC, { people }, { merge: true });
-      }
-    } catch {}
-    setForm({ name: "", specialty: "" });
-  };
-  const editDoctor = async (id) => {
-    const d = state.doctorDirectory[id];
-    const name = prompt("Name:", d.name); if (!name) return;
-    const specialty = prompt("Specialty:", d.specialty || "") ?? "";
-    await setState({ ...state, doctorDirectory: { ...state.doctorDirectory, [id]: { ...d, name: name.trim(), specialty: specialty.trim() } } }, { role: "ADMIN", action: "doctorEdit", id });
-  };
-  const toggleDoctor = async (id, active) => {
-    await setState({ ...state, doctorDirectory: { ...state.doctorDirectory, [id]: { ...state.doctorDirectory[id], active } } }, { role: "ADMIN", action: active ? "doctorReactivate" : "doctorDeactivate", id });
-  };
-  const deleteDoctor = async (id) => {
-    if (Object.values(state.assigned || {}).some((a) => a?.id === id)) { alert("Cannot delete: doctor is assigned to a room."); return; }
-    if (!window.confirm("Delete this doctor?")) return;
-    const next = { ...state, doctorDirectory: { ...state.doctorDirectory } };
-    delete next.doctorDirectory[id];
-    await setState(next, { role: "ADMIN", action: "doctorDelete", id });
-  };
-
   const addRoom = async () => {
     const id = newRoom.trim().toUpperCase();
     if (!id || (state.rooms || []).includes(id)) return;
     const rooms = [...(state.rooms || DEFAULT_ROOMS), id];
-    await setState({ ...state, rooms, assigned: { ...state.assigned, [id]: null }, sessions: { ...state.sessions, [id]: null }, nowServing: { ...state.nowServing, [id]: null }, upNext: { ...state.upNext, [id]: null }, customCall: { ...state.customCall, [id]: null }, status: { ...state.status, [id]: "IDLE" } }, { role: "ADMIN", action: "addRoom", id });
+    await setState({ ...state, rooms }, { role: "ADMIN", action: "addRoom", id });
     await addRoomCredential(id);
     setNewRoom("");
   };
+
   const removeRoom = async (id) => {
     if (!window.confirm(`Remove room ${id}? This cannot be undone.`)) return;
     const rooms = (state.rooms || []).filter((r) => r !== id);
     await setState({ ...state, rooms }, { role: "ADMIN", action: "removeRoom", id });
     await deleteRoomDoc(id);
     await removeRoomCredential(id);
-  };
-
-  const updateChime = async (patch) => {
-    await setState({ ...state, chime: { ...state.chime, ...patch } }, { role: "ADMIN", action: "chimeUpdate" });
-  };
-  const testChime = () => {
-    try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const vol = ctx.createGain(); vol.gain.value = state.chime?.volume ?? 0.22; vol.connect(ctx.destination);
-      const beep = (t, f) => { const o = ctx.createOscillator(); o.type = "sine"; o.frequency.value = f; o.connect(vol); o.start(t); o.stop(t + 0.14); };
-      const t0 = ctx.currentTime + 0.01; beep(t0, 880); beep(t0 + 0.22, 1046);
-    } catch {}
   };
 
   const loadAudit = async () => {
@@ -1409,15 +1361,11 @@ function AdminPortal() {
       const snap = await getDocs(q);
       setAuditLog(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
     } catch (e) {
-      setAuditLog([{ id: "err", action: "Failed to load: " + e.message }]);
+      setAuditLog([{ id: "err", action: "Failed: " + e.message }]);
     }
     setAuditLoading(false);
   };
   useEffect(() => { if (tab === "audit") loadAudit(); }, [tab]);
-
-  const doctors = Object.values(state.doctorDirectory || {});
-  const TABS = ["rooms", "doctors", "stafflogins", "analytics", "audit", "settings"];
-  const TAB_LABELS = { rooms: "🏥 Rooms", doctors: "👤 Doctors", stafflogins: "👥 Staff Logins", analytics: "📊 Analytics", audit: "📋 Audit", settings: "⚙️ Settings" };
 
   return (
     <div className="portal-bg">
@@ -1481,33 +1429,6 @@ function AdminPortal() {
                   ))}
                 </tbody>
               </table>
-            </div>
-          </div>
-        )}
-
-        {tab === "doctors" && (
-          <div className="card">
-            <h2 className="card-title">Doctor Directory</h2>
-            <div className="add-row">
-              <input className="field-input" placeholder="Full name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-              <input className="field-input" placeholder="Specialty (optional)" value={form.specialty} onChange={(e) => setForm({ ...form, specialty: e.target.value })} />
-              <button className="btn btn-green" onClick={addDoctor}>+ Add</button>
-            </div>
-            {doctors.length === 0 && <div className="dim">No doctors added yet.</div>}
-            <div className="divide-list">
-              {doctors.map((d) => (
-                <div key={d.id} className="divide-row">
-                  <div>
-                    <div className="fw-med">{d.name}</div>
-                    <div className="dim" style={{ fontSize: "0.82rem" }}>{d.specialty || "General"} · <span style={{ color: d.active ? "#22c55e" : "#ef4444" }}>{d.active ? "Active" : "Inactive"}</span></div>
-                  </div>
-                  <div className="btn-group">
-                    <button className="btn btn-outline btn-sm" onClick={() => editDoctor(d.id)}>Edit</button>
-                    <button className={`btn btn-sm ${d.active ? "btn-yellow" : "btn-green"}`} onClick={() => toggleDoctor(d.id, !d.active)}>{d.active ? "Deactivate" : "Reactivate"}</button>
-                    <button className="btn btn-red btn-sm" onClick={() => deleteDoctor(d.id)}>Delete</button>
-                  </div>
-                </div>
-              ))}
             </div>
           </div>
         )}
@@ -1704,70 +1625,38 @@ function AdminSettingsTab({ state, setState }) {
 ───────────────────────────────────────────── */
 function DeveloperPortal() {
   const { state, setState } = useClinicState();
-  const [tab, setTab] = useState("doctors");
-  const [form, setForm] = useState({ name: "", specialty: "" });
+  const [tab, setTab] = useState("rooms");
   const [newRoom, setNewRoom] = useState("");
 
-  /* Doctor CRUD */
-  const addDoctor = async () => {
-    const name = form.name.trim();
-    if (!name) return;
-    const id = `doc_${Date.now()}`;
-    const next = { ...state, doctorDirectory: { ...state.doctorDirectory, [id]: { id, name, specialty: form.specialty.trim(), active: true } } };
-    await setState(next, { role: "DEVELOPER", action: "doctorAdd", id });
-    setForm({ name: "", specialty: "" });
-  };
-  const editDoctor = async (id) => {
-    const d = state.doctorDirectory[id];
-    const name = prompt("Name:", d.name); if (!name) return;
-    const specialty = prompt("Specialty:", d.specialty || "") ?? "";
-    const next = { ...state, doctorDirectory: { ...state.doctorDirectory, [id]: { ...d, name: name.trim(), specialty: specialty.trim() } } };
-    await setState(next, { role: "DEVELOPER", action: "doctorEdit", id });
-  };
-  const toggleDoctor = async (id, active) => {
-    const next = { ...state, doctorDirectory: { ...state.doctorDirectory, [id]: { ...state.doctorDirectory[id], active } } };
-    await setState(next, { role: "DEVELOPER", action: active ? "doctorReactivate" : "doctorDeactivate", id });
-  };
-  const deleteDoctor = async (id) => {
-    if (Object.values(state.assigned || {}).some((a) => a?.id === id)) { alert("Cannot delete: doctor is assigned to a room."); return; }
-    if (!window.confirm("Delete this doctor?")) return;
-    const next = { ...state, doctorDirectory: { ...state.doctorDirectory } };
-    delete next.doctorDirectory[id];
-    await setState(next, { role: "DEVELOPER", action: "doctorDelete", id });
-  };
-
-  /* Room management */
   const addRoom = async () => {
     const id = newRoom.trim().toUpperCase();
     if (!id || (state.rooms || []).includes(id)) return;
     const rooms = [...(state.rooms || DEFAULT_ROOMS), id];
-    const next = { ...state, rooms, assigned: { ...state.assigned, [id]: null }, sessions: { ...state.sessions, [id]: null }, nowServing: { ...state.nowServing, [id]: null }, upNext: { ...state.upNext, [id]: null }, customCall: { ...state.customCall, [id]: null }, status: { ...state.status, [id]: "IDLE" } };
-    await setState(next, { role: "DEVELOPER", action: "addRoom", id });
+    await setState({ ...state, rooms }, { role: "DEVELOPER", action: "addRoom", id });
     await addRoomCredential(id);
     setNewRoom("");
   };
+
   const removeRoom = async (id) => {
-    if (!window.confirm(`Remove room ${id}?`)) return;
+    if (!window.confirm(`Remove room ${id}? This cannot be undone.`)) return;
     const rooms = (state.rooms || []).filter((r) => r !== id);
     await setState({ ...state, rooms }, { role: "DEVELOPER", action: "removeRoom", id });
     await deleteRoomDoc(id);
     await removeRoomCredential(id);
   };
 
-  /* Chime */
   const updateChime = async (patch) => {
     await setState({ ...state, chime: { ...state.chime, ...patch } }, { role: "DEVELOPER", action: "chimeUpdate" });
   };
+
   const testChime = () => {
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
       const vol = ctx.createGain(); vol.gain.value = state.chime?.volume ?? 0.22; vol.connect(ctx.destination);
-      const beep = (t, f) => { const o = ctx.createOscillator(); o.type="sine"; o.frequency.value=f; o.connect(vol); o.start(t); o.stop(t+0.14); };
-      const t0 = ctx.currentTime+0.01; beep(t0,880); beep(t0+0.22,1046);
+      const beep = (t, f) => { const o = ctx.createOscillator(); o.type = "sine"; o.frequency.value = f; o.connect(vol); o.start(t); o.stop(t + 0.14); };
+      const t0 = ctx.currentTime + 0.01; beep(t0, 880); beep(t0 + 0.22, 1046);
     } catch {}
   };
-
-  const doctors = Object.values(state.doctorDirectory || {});
 
   return (
     <div className="portal-bg">
@@ -1781,47 +1670,12 @@ function DeveloperPortal() {
         </div>
 
         <div className="tab-bar">
-          {["doctors","rooms","import","staff","patients","admins","chime","branding","schedule","analytics"].map((t) => (
+          {["rooms","import","staff","patients","admins","chime","branding","schedule","analytics"].map((t) => (
             <button key={t} className={`tab-btn${tab===t?" active":""}`} onClick={() => setTab(t)}>
-              {t==="doctors"?"👤 Doctors":t==="rooms"?"🏥 Rooms":t==="import"?"📥 Import":t==="staff"?"👥 Staff":t==="patients"?"🏥 Patients":t==="admins"?"🔐 Admins":t==="chime"?"🔔 Chime":t==="branding"?"🎨 Branding":t==="schedule"?"🕐 Schedule":"📊 Analytics"}
+              {t==="rooms"?"🏥 Rooms":t==="import"?"📥 Import":t==="staff"?"👥 Staff":t==="patients"?"🏥 Patients":t==="admins"?"🔐 Admins":t==="chime"?"🔔 Chime":t==="branding"?"🎨 Branding":t==="schedule"?"🕐 Schedule":"📊 Analytics"}
             </button>
           ))}
         </div>
-
-        {tab === "doctors" && (
-          <div className="card">
-            <h2 className="card-title">Doctor Directory</h2>
-            <div className="add-row">
-              <input className="field-input" placeholder="Full name" value={form.name} onChange={(e) => setForm({...form,name:e.target.value})} />
-              <input className="field-input" placeholder="Specialty (optional)" value={form.specialty} onChange={(e) => setForm({...form,specialty:e.target.value})} />
-              <button className="btn btn-green" onClick={addDoctor}>+ Add</button>
-              <button className="btn btn-outline" title="Sync emails from staff list into doctor directory" onClick={async () => {
-                try {
-                  const snap = await getDoc(STAFF_DOC);
-                  const people = snap.exists() ? (snap.data().people || []) : [];
-                  await rebuildDoctorDirectory(people, state, setState);
-                  alert(`✓ Doctor directory rebuilt from ${people.filter(p => p.role === "DOCTOR").length} staff doctors.`);
-                } catch (e) { alert("Rebuild failed: " + e.message); }
-              }}>↻ Rebuild from staff list</button>
-            </div>
-            {doctors.length === 0 && <div className="dim">No doctors added yet.</div>}
-            <div className="divide-list">
-              {doctors.map((d) => (
-                <div key={d.id} className="divide-row">
-                  <div>
-                    <div className="fw-med">{d.name}</div>
-                    <div className="dim" style={{fontSize:"0.82rem"}}>{d.specialty||"General"} · <span style={{color:d.active?"#22c55e":"#ef4444"}}>{d.active?"Active":"Inactive"}</span></div>
-                  </div>
-                  <div className="btn-group">
-                    <button className="btn btn-outline btn-sm" onClick={() => editDoctor(d.id)}>Edit</button>
-                    <button className={`btn btn-sm ${d.active?"btn-yellow":"btn-green"}`} onClick={() => toggleDoctor(d.id,!d.active)}>{d.active?"Deactivate":"Reactivate"}</button>
-                    <button className="btn btn-red btn-sm" onClick={() => deleteDoctor(d.id)}>Delete</button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
 
         {tab === "rooms" && (
           <div className="card">
@@ -2217,18 +2071,26 @@ function StaffDirectoryTab({ state, setState }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
       {/* Summary strip */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: "0.75rem" }}>
-        {[
-          { label: "Total people", value: total },
-          { label: "Doctors", value: docCount },
-          { label: "With login", value: loginCount },
-          { label: "Receptionists", value: recCount },
-        ].map((m) => (
-          <div key={m.label} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "10px", padding: "0.9rem 1rem" }}>
-            <div style={{ fontSize: "0.72rem", color: "var(--text-dim)", marginBottom: "0.3rem" }}>{m.label}</div>
-            <div style={{ fontSize: "1.5rem", fontWeight: 600, fontFamily: "'Space Grotesk', sans-serif" }}>{m.value}</div>
-          </div>
-        ))}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: "0.75rem", flex: 1 }}>
+          {[
+            { label: "Total people", value: total },
+            { label: "Doctors", value: docCount },
+            { label: "With login", value: loginCount },
+            { label: "Receptionists", value: recCount },
+          ].map((m) => (
+            <div key={m.label} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "10px", padding: "0.9rem 1rem" }}>
+              <div style={{ fontSize: "0.72rem", color: "var(--text-dim)", marginBottom: "0.3rem" }}>{m.label}</div>
+              <div style={{ fontSize: "1.5rem", fontWeight: 600, fontFamily: "'Space Grotesk', sans-serif" }}>{m.value}</div>
+            </div>
+          ))}
+        </div>
+        <button className="btn btn-outline btn-sm" style={{ flexShrink: 0 }} onClick={async () => {
+          try {
+            await rebuildDoctorDirectory(staff, state, setState);
+            setMsg("✓ Doctor directory rebuilt from staff list.");
+          } catch (e) { setMsg("Rebuild failed: " + e.message); }
+        }}>↻ Rebuild doctor directory</button>
       </div>
 
       <div className="card">

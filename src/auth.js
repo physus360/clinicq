@@ -69,7 +69,7 @@ export function onAuthChange(callback) {
       const configSnap = await getDoc(doc(db, "clinicq", "config"));
       if (configSnap.exists()) {
         const adminEmails = configSnap.data().adminEmails || [];
-        if (adminEmails.includes(user.email?.toLowerCase())) {
+        if (adminEmails.map(e => e.toLowerCase()).includes(user.email?.toLowerCase())) {
           callback({ user, role: "ADMIN", room: null });
           return;
         }
@@ -129,11 +129,23 @@ async function _validateDeveloper(user) {
     await signOut(auth);
     return { success: false, error: "Developer email not configured. Set VITE_DEVELOPER_EMAIL." };
   }
-  if (user.email !== DEVELOPER_EMAIL) {
-    await signOut(auth);
-    return { success: false, error: `Access denied. Only ${DEVELOPER_EMAIL} can sign in as Developer.` };
+  // Developer always allowed
+  if (user.email === DEVELOPER_EMAIL) {
+    return { success: true };
   }
-  return { success: true };
+  // Check if email is in the Admin whitelist
+  try {
+    const configSnap = await getDoc(doc(db, "clinicq", "config"));
+    if (configSnap.exists()) {
+      const adminEmails = configSnap.data().adminEmails || [];
+      if (adminEmails.map(e => e.toLowerCase()).includes(user.email?.toLowerCase())) {
+        return { success: true };
+      }
+    }
+  } catch {}
+  // Not Developer or Admin — reject
+  await signOut(auth);
+  return { success: false, error: "Access denied. Your account is not authorised as Developer or Admin." };
 }
 
 /* ─────────────────────────────────────────────
