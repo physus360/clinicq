@@ -371,10 +371,10 @@ function estimateWait(state, roomId) {
 ═══════════════════════════════════════════ */
 export default function ClinicQ() {
   const { role, room, loading } = useAuth();
-  const [page, setPage] = useState(() => window.location.hash.replace("#", "") || "lobby");
+  const [page, setPage] = useState(() => (window.location.hash.replace("#", "").split("?")[0]) || "lobby");
 
   useEffect(() => {
-    const onHash = () => setPage(window.location.hash.replace("#", "") || "lobby");
+    const onHash = () => setPage((window.location.hash.replace("#", "").split("?")[0]) || "lobby");
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
@@ -2466,6 +2466,17 @@ function ReceptionPortal() {
     }, { role: "RECEPTION", action: "endSession", roomId });
   };
 
+  const clearAllRooms = async () => {
+    const assignedCount = (state.rooms || []).filter((r) => state.assigned[r]).length;
+    if (assignedCount === 0) { alert("No rooms are currently assigned."); return; }
+    if (!window.confirm(`Clear all ${assignedCount} room assignment(s)? Doctors will need to be re-assigned.`)) return;
+    await Promise.all((state.rooms || DEFAULT_ROOMS).map((r) =>
+      setRoom(r, {
+        assigned: null, sessions: null, nowServing: null, upNext: null, customCall: null, status: "IDLE",
+      }, { role: "RECEPTION", action: "clearAllRooms", roomId: r })
+    ));
+  };
+
   return (
     <div className="portal-bg">
       <div className="portal-container" style={{ maxWidth: "960px" }}>
@@ -2484,7 +2495,10 @@ function ReceptionPortal() {
         </div>
         {tab === "rooms" && (
           <div className="card">
-            <h2 className="card-title">Assign Doctors to Rooms</h2>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+              <h2 className="card-title" style={{ margin: 0 }}>Assign Doctors to Rooms</h2>
+              <button className="btn btn-outline btn-sm" onClick={clearAllRooms}>Clear all assignments</button>
+            </div>
             <div className="divide-list">
               {(state.rooms || DEFAULT_ROOMS).map((r) => (
                 <div key={r} className="divide-row">
