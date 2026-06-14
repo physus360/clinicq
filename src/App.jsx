@@ -741,7 +741,7 @@ function Lobby() {
           <div className="lobby-time">{timeStr}</div>
           <div className="lobby-date">{dateStr}</div>
         </div>
-        <LobbyQR url={APP_URL} />
+        <LobbyQR url={APP_URL} dark={isDark} />
       </div>
     </div>
   );
@@ -1127,6 +1127,12 @@ function DoctorPortal({ room: roomProp }) {
     }, "endSession", "END");
   };
 
+  const markServed = async (visitId) => {
+    try {
+      await setDoc(doc(db, "clinicq_visits", visitId), { status: "served" }, { merge: true });
+    } catch (e) { console.warn("markServed:", e.message); }
+  };
+
   const nextToken = () => {
     const cur = state.nowServing[actualRoom] || 0;
     const next = cur + 1;
@@ -1138,6 +1144,11 @@ function DoctorPortal({ room: roomProp }) {
       status: "CALLING",
       sessions: sess ? { ...sess, served: (sess.served || 0) + 1 } : null,
     }, "next", "CALL");
+    // Mark the patient who was just served (token === cur) as served
+    if (cur > 0) {
+      const visit = patients.find((p) => p.token === cur && p.status === "waiting");
+      if (visit) markServed(visit.id);
+    }
   };
 
   const prevToken = () => {
@@ -1199,12 +1210,6 @@ function DoctorPortal({ room: roomProp }) {
   const sessionDur = session?.startedAt
     ? Math.round((Date.now() - session.startedAt) / 60000)
     : 0;
-
-  const markServed = async (visitId) => {
-    try {
-      await setDoc(doc(db, "clinicq_visits", visitId), { status: "served" }, { merge: true });
-    } catch (e) { console.warn("markServed:", e.message); }
-  };
 
   return (
     <div className="portal-bg">
@@ -2765,7 +2770,7 @@ function BookAppointmentTab({ state }) {
   const printTicket = async () => {
     if (!lastTicket) return;
     const t = lastTicket;
-    const trackUrl = `${APP_URL}/#track?token=${t.token}&room=${t.room}&date=${t.date}`;
+    const trackUrl = `${APP_URL}/#track?token=${t.token}&room=${t.room}&doctor=${t.doctorId || ""}&date=${t.date}`;
     const qrDataUrl = await generateQRDataURL(trackUrl);
     const w = window.open("", "_blank", "width=320,height=500");
     w.document.write(`<html><head><title>Token ${t.token}</title>
@@ -2873,7 +2878,7 @@ function BookAppointmentTab({ state }) {
 
         {lastTicket && (
           <div style={{ marginTop: "1rem", padding: "1rem", background: "var(--bg)", borderRadius: "10px", display: "flex", alignItems: "center", gap: "1.25rem" }}>
-            <LobbyQR url={`${APP_URL}/#track?token=${lastTicket.token}&room=${lastTicket.room}&date=${lastTicket.date}`} dark={false} />
+            <LobbyQR url={`${APP_URL}/#track?token=${lastTicket.token}&room=${lastTicket.room}&doctor=${lastTicket.doctorId || ""}&date=${lastTicket.date}`} dark={false} />
             <div>
               <div style={{ fontWeight: 700 }}>Token {lastTicket.token}</div>
               <div style={{ fontSize: "0.85rem", color: "var(--text-dim)" }}>{roomDisplay(lastTicket.room)} · {lastTicket.doctorName}</div>
@@ -2916,7 +2921,7 @@ function ActiveAppointmentsTab({ state }) {
   };
 
   const reprint = async (v) => {
-    const trackUrl = `${APP_URL}/#track?token=${v.token}&room=${v.room}&date=${v.date}`;
+    const trackUrl = `${APP_URL}/#track?token=${v.token}&room=${v.room}&doctor=${v.doctorId || ""}&date=${v.date}`;
     const time = new Date(v.createdAt || Date.now()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     const qrDataUrl = await generateQRDataURL(trackUrl);
     const w = window.open("", "_blank", "width=320,height=500");
@@ -3330,7 +3335,7 @@ function PatientRegistration({ state }) {
   const printTicket = async () => {
     if (!lastTicket) return;
     const t = lastTicket;
-    const trackUrl = `${APP_URL}/#track?token=${t.token}&room=${t.room}&date=${t.date}`;
+    const trackUrl = `${APP_URL}/#track?token=${t.token}&room=${t.room}&doctor=${t.doctorId || ""}&date=${t.date}`;
     const qrDataUrl = await generateQRDataURL(trackUrl);
     const w = window.open("", "_blank", "width=320,height=500");
     w.document.write(`<html><head><title>Token ${t.token}</title>
@@ -3432,7 +3437,7 @@ function PatientRegistration({ state }) {
           <div style={{ marginTop: "1rem", padding: "1rem", background: "var(--bg)", borderRadius: "10px", display: "flex", alignItems: "center", gap: "1.25rem" }}>
             <div>
               <div style={{ fontSize: "0.75rem", color: "var(--text-dim)", marginBottom: "0.25rem" }}>Patient tracking QR</div>
-              <LobbyQR url={`${APP_URL}/#track?token=${lastTicket.token}&room=${lastTicket.room}&date=${lastTicket.date}`} dark={false} />
+              <LobbyQR url={`${APP_URL}/#track?token=${lastTicket.token}&room=${lastTicket.room}&doctor=${lastTicket.doctorId || ""}&date=${lastTicket.date}`} dark={false} />
             </div>
             <div>
               <div style={{ fontWeight: 700, fontSize: "1.1rem" }}>Token {lastTicket.token}</div>
@@ -3475,20 +3480,42 @@ function PatientRegistration({ state }) {
 function TokenTracker() {
   const params = new URLSearchParams(window.location.hash.split("?")[1] || "");
   const myToken = parseInt(params.get("token") || "0");
-  const room = params.get("room") || "";
+  const roomParam = params.get("room") || "";
+  const doctorId = params.get("doctor") || "";
   const date = params.get("date") || "";
 
   const { state, ready } = useClinicState();
   const [tick, setTick] = useState(0);
   useEffect(() => { const t = setInterval(() => setTick((n) => n + 1), 1000); return () => clearInterval(t); }, []);
 
-  if (!myToken || !room) {
+  // Resolve room: use the param if set, otherwise look up the doctor's current room
+  const room = roomParam || (() => {
+    if (!doctorId) return "";
+    const entry = Object.entries(state.assigned || {}).find(([, a]) => a?.id === doctorId);
+    return entry ? entry[0] : "";
+  })();
+
+  if (!myToken || (!room && !doctorId)) {
     return (
       <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#060810", color: "#fff", padding: "2rem", textAlign: "center" }}>
         <div>
           <div style={{ fontSize: "3rem", marginBottom: "1rem" }}>🏥</div>
           <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "1.2rem", fontWeight: 600 }}>{CLINIC_NAME}</div>
           <div style={{ opacity: 0.5, marginTop: "0.5rem" }}>Invalid tracking link.</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!room) {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#060810", color: "#fff", padding: "2rem", textAlign: "center" }}>
+        <div>
+          <div style={{ fontSize: "3rem", marginBottom: "1rem" }}>🏥</div>
+          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "1.2rem", fontWeight: 600 }}>{CLINIC_NAME}</div>
+          <div style={{ fontSize: "2.5rem", fontWeight: 800, margin: "1rem 0", color: "#3b82f6" }}>Token {myToken}</div>
+          <div style={{ opacity: 0.6 }}>Your doctor hasn't been assigned a room yet.</div>
+          <div style={{ opacity: 0.4, fontSize: "0.85rem", marginTop: "0.5rem" }}>Please check back shortly, or ask Reception.</div>
         </div>
       </div>
     );
