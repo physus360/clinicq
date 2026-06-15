@@ -1709,7 +1709,7 @@ function DeveloperPortal() {
         <div className="tab-bar">
           {["rooms","import","staff","patients","admins","chime","branding","schedule","analytics"].map((t) => (
             <button key={t} className={`tab-btn${tab===t?" active":""}`} onClick={() => setTab(t)}>
-              {t==="rooms"?"🏥 Rooms":t==="import"?"📥 Import":t==="staff"?"👥 Staff":t==="patients"?"🏥 Patients":t==="admins"?"🔐 Admins":t==="chime"?"🔔 Chime":t==="branding"?"🎨 Branding":t==="schedule"?"🕐 Schedule":"📊 Analytics"}
+              {t==="rooms"?"🏥 Rooms":t==="import"?"📥 Import":t==="staff"?"👥 Staff Directory":t==="patients"?"🏥 Patients":t==="admins"?"🔐 Admins":t==="chime"?"🔔 Chime":t==="branding"?"🎨 Branding":t==="schedule"?"🕐 Schedule":"📊 Analytics"}
             </button>
           ))}
         </div>
@@ -1779,10 +1779,14 @@ function DeveloperPortal() {
 ───────────────────────────────────────────── */
 // Build a stable doctorDirectory from the staff list
 // Uses email as the stable key so it never drifts from the login system
-async function rebuildDoctorDirectory(people, state, setState) {
+async function rebuildDoctorDirectory(people, state, setState, setStaff) {
   const dir = {};
-  people.filter((p) => p.role === "DOCTOR" && p.name).forEach((p) => {
-    // Use email-based key for stability; fallback to name-based
+  let staffList = [...people];
+  let staffChanged = false;
+
+  // Build directory from staff with category === "doctor" and active !== false
+  // Login status (role) no longer affects whether they appear in operational dropdowns
+  staffList.filter((p) => p.category === "doctor" && p.active !== false && p.name).forEach((p) => {
     const key = p.email
       ? "doc_" + p.email.replace(/[^a-zA-Z0-9]/g, "_")
       : "doc_" + p.name.replace(/[^a-zA-Z0-9]/g, "_");
@@ -1796,15 +1800,50 @@ async function rebuildDoctorDirectory(people, state, setState) {
       active: true,
     };
   });
-  // Merge with existing non-staff doctors (added manually, not from import)
+
+  // Migrate: any existing doctorDirectory entries not represented in staff get added to staff
+  // (covers doctors added before the staff directory existed, e.g. via old "Add Doctor" UI)
   const existing = state.doctorDirectory || {};
   Object.values(existing).forEach((d) => {
-    if (!d.email || !people.find((p) => p.email === d.email)) {
-      // Keep manually added doctors that aren't in the staff list
-      if (!dir[d.id]) dir[d.id] = d;
+    const inStaff = staffList.find((p) =>
+      (d.email && p.email && p.email.toLowerCase() === d.email.toLowerCase()) ||
+      (!d.email && p.name === d.name)
+    );
+    if (!inStaff && d.name) {
+      // Add to staff as a doctor
+      staffList.push({
+        name: d.name,
+        idNumber: d.idNumber || "",
+        registrationNo: d.registrationNo || "",
+        designation: d.specialty || "General",
+        email: d.email || "",
+        contact: "",
+        category: "doctor",
+        active: true,
+        role: d.email ? "DOCTOR" : null, // assume they have a login if they have an email
+      });
+      staffChanged = true;
+      // Also add to directory now that they're in staff
+      const key = d.email
+        ? "doc_" + d.email.replace(/[^a-zA-Z0-9]/g, "_")
+        : "doc_" + d.name.replace(/[^a-zA-Z0-9]/g, "_");
+      if (!dir[key]) {
+        dir[key] = { ...d, id: key, active: true };
+      }
+    } else if (!dir[d.id] && d.active !== false) {
+      // Keep entries already correctly represented but with a different key
+      if (inStaff && inStaff.category === "doctor" && inStaff.active !== false) {
+        // Already covered by the staff-based build above under a possibly different key — skip duplicate
+      }
     }
   });
+
   await setState({ ...state, doctorDirectory: dir }, { role: "SYSTEM", action: "rebuildDoctorDirectory" });
+
+  if (staffChanged && setStaff) {
+    await setDoc(STAFF_DOC, { people: staffList });
+    setStaff(staffList);
+  }
 }
 
 async function grantRole(person, role, staff, setStaff, state, setState) {
@@ -1815,8 +1854,9 @@ async function grantRole(person, role, staff, setStaff, state, setState) {
   );
   await setDoc(STAFF_DOC, { people: merged });
   setStaff(merged);
-  // Rebuild doctorDirectory if granting DOCTOR role
-  if (role === "DOCTOR") await rebuildDoctorDirectory(merged, state, setState);
+  // Directory is built from category, not role — but email may have just been confirmed,
+  // so rebuild to ensure the directory entry has the correct email-based key.
+  if (role === "DOCTOR" || person.category === "doctor") await rebuildDoctorDirectory(merged, state, setState, setStaff);
 }
 
 async function revokeRole(person, staff, setStaff, state, setState) {
@@ -1827,8 +1867,7 @@ async function revokeRole(person, staff, setStaff, state, setState) {
   );
   await setDoc(STAFF_DOC, { people: merged });
   setStaff(merged);
-  // Rebuild if revoking a DOCTOR role
-  if (person.role === "DOCTOR") await rebuildDoctorDirectory(merged, state, setState);
+  // Revoking login no longer affects the operational directory (based on category, not role)
 }
 
 /* ─────────────────────────────────────────────
@@ -1872,6 +1911,15 @@ function StaffImportTab({ state, setState }) {
           const name = get("name");
           if (!name) return;
           const designation = get("speciality", "designation", "user type") || (isDoctorSheet ? "Doctor" : "Staff");
+          const category = isDoctorSheet || /doctor|practitioner|surgeon|physician|dr\.?\s/i.test(designation)
+            ? "doctor"
+            : /nurse|midwife/i.test(designation)
+            ? "nurse"
+            : /reception|front\s*desk|clerk/i.test(designation)
+            ? "receptionist"
+            : /admin|manager|coordinator|supervisor|hr\b/i.test(designation)
+            ? "admin_staff"
+            : "staff";
           people.push({
             name: name.replace(/\s+/g, " ").trim(),
             idNumber: get("id no", "passport", "id"),
@@ -1879,7 +1927,8 @@ function StaffImportTab({ state, setState }) {
             designation,
             email: get("email"),
             contact: get("contact"),
-            category: isDoctorSheet || /doctor|practitioner|surgeon|physician/i.test(designation) ? "doctor" : "staff",
+            category,
+            active: true,
           });
         });
       });
@@ -1927,10 +1976,8 @@ function StaffImportTab({ state, setState }) {
         }
       });
       await setState({ ...state, doctorDirectory: dir }, { role: "DEVELOPER", action: "staffImport", count: preview.length });
-      // Rebuild from staff list to ensure email-based IDs are used
-      const staffSnap = await getDoc(STAFF_DOC);
-      const allPeople = staffSnap.exists() ? (staffSnap.data().people || []) : [];
-      await rebuildDoctorDirectory(allPeople, { ...state, doctorDirectory: dir }, setState);
+      // Rebuild from the freshly-imported staff list to ensure category-based directory + email keys
+      await rebuildDoctorDirectory(merged, { ...state, doctorDirectory: dir }, setState);
       setMsg(`✓ Imported ${preview.length} people (${doctors.length} doctors added to assignment directory). Manage roles in the Staff tab.`);
       setPreview(null);
     } catch (e) {
@@ -2003,7 +2050,7 @@ function StaffDirectoryTab({ state, setState }) {
     }).catch(() => setLoading(false));
   }, []);
 
-  const blankPerson = () => ({ name: "", idNumber: "", registrationNo: "", designation: "", email: "", contact: "", category: "staff", role: null });
+  const blankPerson = () => ({ name: "", idNumber: "", registrationNo: "", designation: "", email: "", contact: "", category: "staff", active: true, role: null });
 
   const openAdd = () => { setEditing(blankPerson()); setIsNew(true); setMsg(""); };
   const openEdit = (person) => { setEditing({ ...person }); setIsNew(false); setMsg(""); };
@@ -2081,10 +2128,29 @@ function StaffDirectoryTab({ state, setState }) {
     setStaff(merged);
   };
 
-  const roleOptions = (person) =>
-    person.category === "doctor"
-      ? ["DOCTOR", "ADMIN"]
-      : ["RECEPTIONIST", "ADMIN", "DOCTOR"];
+  const roleOptions = (person) => {
+    if (person.category === "doctor") return ["DOCTOR", "ADMIN"];
+    if (person.category === "receptionist") return ["RECEPTIONIST", "ADMIN"];
+    return ["RECEPTIONIST", "ADMIN", "DOCTOR"]; // nurse, admin_staff, other — flexible
+  };
+
+  const CATEGORY_LABELS = {
+    doctor: "Doctor", nurse: "Nurse", receptionist: "Receptionist",
+    admin_staff: "Admin Staff", staff: "Other",
+  };
+  const CATEGORY_COLORS = {
+    doctor: "#2563eb", nurse: "#16a34a", receptionist: "#f59e0b",
+    admin_staff: "#a855f7", staff: "#64748b",
+  };
+
+  const toggleActive = async (person) => {
+    const merged = staff.map((p) =>
+      (p.idNumber || p.name) === (person.idNumber || person.name) ? { ...p, active: person.active === false ? true : false } : p
+    );
+    await setDoc(STAFF_DOC, { people: merged });
+    setStaff(merged);
+    if (person.category === "doctor") await rebuildDoctorDirectory(merged, state, setState, setStaff);
+  };
 
   // Summary
   const total = staff.length;
@@ -2097,7 +2163,10 @@ function StaffDirectoryTab({ state, setState }) {
   const filtered = staff.filter((p) => {
     if (q && !(`${p.name} ${p.designation} ${p.email} ${p.idNumber}`.toLowerCase().includes(q))) return false;
     if (filter === "doctor") return p.category === "doctor";
-    if (filter === "staff") return p.category !== "doctor";
+    if (filter === "nurse") return p.category === "nurse";
+    if (filter === "receptionist") return p.category === "receptionist";
+    if (filter === "admin_staff") return p.category === "admin_staff";
+    if (filter === "other") return !["doctor", "nurse", "receptionist", "admin_staff"].includes(p.category);
     if (filter === "login") return !!p.role;
     if (filter === "nologin") return !p.role;
     return true;
@@ -2124,7 +2193,7 @@ function StaffDirectoryTab({ state, setState }) {
         </div>
         <button className="btn btn-outline btn-sm" style={{ flexShrink: 0 }} onClick={async () => {
           try {
-            await rebuildDoctorDirectory(staff, state, setState);
+            await rebuildDoctorDirectory(staff, state, setState, setStaff);
             setMsg("✓ Doctor directory rebuilt from staff list.");
           } catch (e) { setMsg("Rebuild failed: " + e.message); }
         }}>↻ Rebuild doctor directory</button>
@@ -2135,7 +2204,7 @@ function StaffDirectoryTab({ state, setState }) {
         <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", marginBottom: "1rem", alignItems: "center" }}>
           <input className="field-input" placeholder="Search name, speciality, email…" value={search} onChange={(e) => setSearch(e.target.value)} style={{ flex: 1, minWidth: "200px" }} />
           <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
-            {[["all","All"],["doctor","Doctors"],["staff","Staff"],["login","Has login"],["nologin","No login"]].map(([k, label]) => (
+            {[["all","All"],["doctor","Doctors"],["nurse","Nurses"],["receptionist","Reception"],["admin_staff","Admin Staff"],["other","Other"],["login","Has login"],["nologin","No login"]].map(([k, label]) => (
               <button key={k} className={`tab-btn${filter === k ? " active" : ""}`} style={{ padding: "0.35rem 0.7rem", fontSize: "0.8rem" }} onClick={() => setFilter(k)}>{label}</button>
             ))}
           </div>
@@ -2146,17 +2215,22 @@ function StaffDirectoryTab({ state, setState }) {
 
         <div className="table-wrap">
           <table className="data-table">
-            <thead><tr><th>Name</th><th>Designation</th><th>Email</th><th>Login</th><th style={{ width: "160px" }}>Manage</th></tr></thead>
+            <thead><tr><th>Name</th><th>Category</th><th>Email</th><th>Login</th><th style={{ width: "170px" }}>Manage</th></tr></thead>
             <tbody>
               {filtered.length === 0 ? (
                 <tr><td colSpan={5} className="dim" style={{ textAlign: "center", padding: "1.5rem" }}>No matching people.</td></tr>
               ) : filtered.map((p, i) => (
-                <tr key={i}>
+                <tr key={i} style={{ opacity: p.active === false ? 0.5 : 1 }}>
                   <td>
                     <div style={{ fontWeight: 500 }}>{p.name}</div>
-                    <div className="dim" style={{ fontSize: "0.75rem" }}>{p.idNumber || ""}{p.registrationNo ? ` · ${p.registrationNo}` : ""}</div>
+                    <div className="dim" style={{ fontSize: "0.75rem" }}>{p.designation}{p.idNumber ? ` · ${p.idNumber}` : ""}</div>
                   </td>
-                  <td style={{ fontSize: "0.85rem" }}>{p.designation}</td>
+                  <td>
+                    <span className="status-pill" style={{ background: (CATEGORY_COLORS[p.category] || "#64748b") + "22", color: CATEGORY_COLORS[p.category] || "#64748b", fontSize: "0.75rem" }}>
+                      {CATEGORY_LABELS[p.category] || p.category}
+                    </span>
+                    {p.active === false && <div className="dim" style={{ fontSize: "0.7rem", marginTop: "0.2rem" }}>Inactive</div>}
+                  </td>
                   <td className="dim" style={{ fontSize: "0.8rem" }}>{p.email || "—"}</td>
                   <td>{p.role
                     ? <span className="status-pill" style={{ background: "#16a34a22", color: "#16a34a", fontSize: "0.75rem" }}>{p.role}</span>
@@ -2175,6 +2249,11 @@ function StaffDirectoryTab({ state, setState }) {
                         {p.role && <button className="btn btn-red btn-sm" style={{ fontSize: "0.72rem", padding: "0.2rem 0.4rem" }} disabled={roleBusy === p.email} onClick={() => revoke(p)}>Revoke</button>}
                         <button className="btn btn-outline btn-sm" style={{ fontSize: "0.72rem", padding: "0.2rem 0.4rem" }} onClick={() => openEdit(p)}>Edit</button>
                         <button className="btn btn-outline btn-sm" style={{ fontSize: "0.72rem", padding: "0.2rem 0.4rem" }} onClick={() => removePerson(p)}>✕</button>
+                      </div>
+                      <div style={{ display: "flex", gap: "0.3rem" }}>
+                        <button className="btn btn-outline btn-sm" style={{ fontSize: "0.72rem", padding: "0.2rem 0.4rem", flex: 1 }} onClick={() => toggleActive(p)}>
+                          {p.active === false ? "Mark active" : "Mark inactive"}
+                        </button>
                       </div>
                     </div>
                   </td>
@@ -2212,7 +2291,10 @@ function StaffDirectoryTab({ state, setState }) {
                 <label className="field-label">Category</label>
                 <select className="field-input" value={editing.category} onChange={(e) => setEditing({ ...editing, category: e.target.value })}>
                   <option value="doctor">Doctor</option>
-                  <option value="staff">Staff</option>
+                  <option value="nurse">Nurse</option>
+                  <option value="receptionist">Receptionist</option>
+                  <option value="admin_staff">Admin Staff</option>
+                  <option value="staff">Other</option>
                 </select>
               </div>
             </div>
