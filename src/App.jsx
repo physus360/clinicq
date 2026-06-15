@@ -900,8 +900,15 @@ function DoctorPortal({ room: roomProp }) {
 
   // ALL hooks must be declared before any early returns
   const [patients, setPatients] = useState([]);
+  const [docTheme, setDocTheme] = useState(() => localStorage.getItem("cq_doctor_theme") || "light");
   const play = useChime(state.chime);
   const today = new Date().toISOString().slice(0, 10);
+
+  const toggleDocTheme = () => {
+    const next = docTheme === "dark" ? "light" : "dark";
+    setDocTheme(next);
+    localStorage.setItem("cq_doctor_theme", next);
+  };
 
   // Find which room this doctor is assigned to
   const room = (() => {
@@ -1133,6 +1140,21 @@ function DoctorPortal({ room: roomProp }) {
     } catch (e) { console.warn("markServed:", e.message); }
   };
 
+  const markMissed = async (visitId) => {
+    try {
+      await setDoc(doc(db, "clinicq_visits", visitId), { status: "missed" }, { merge: true });
+    } catch (e) { console.warn("markMissed:", e.message); }
+  };
+
+  // Recall a missed patient — calls their token via customCall without disrupting the queue,
+  // and reverts them to "waiting" so they can be processed normally when they respond.
+  const recallPatient = async (visit) => {
+    try {
+      await setDoc(doc(db, "clinicq_visits", visit.id), { status: "waiting" }, { merge: true });
+    } catch (e) { console.warn("recallPatient:", e.message); }
+    act({ customCall: String(visit.token), status: "CALLING" }, "recallMissed", "CALL");
+  };
+
   const nextToken = () => {
     const cur = state.nowServing[actualRoom] || 0;
     const next = cur + 1;
@@ -1149,6 +1171,22 @@ function DoctorPortal({ room: roomProp }) {
       const visit = patients.find((p) => p.token === cur && p.status === "waiting");
       if (visit) markServed(visit.id);
     }
+  };
+
+  // Mark the current patient (at nowServing) as missed, then advance to next
+  const noShow = () => {
+    const cur = state.nowServing[actualRoom] || 0;
+    if (cur > 0) {
+      const visit = patients.find((p) => p.token === cur && p.status === "waiting");
+      if (visit) markMissed(visit.id);
+    }
+    const next = cur + 1;
+    act({
+      nowServing: next,
+      upNext: next + 1,
+      customCall: null,
+      status: "CALLING",
+    }, "noShow", "CALL");
   };
 
   const prevToken = () => {
@@ -1212,7 +1250,23 @@ function DoctorPortal({ room: roomProp }) {
     : 0;
 
   return (
-    <div className="portal-bg">
+    <div className={`portal-bg${docTheme === "dark" ? " doctor-dark-theme" : ""}`}>
+      {docTheme === "dark" && (
+        <style>{`
+          .doctor-dark-theme {
+            --bg: #0a0e17;
+            --surface: #131a28;
+            --text: #e8eaf0;
+            --text-dim: #8b96ab;
+            --border: #232c3f;
+            --shadow: 0 1px 3px rgba(0,0,0,0.4);
+          }
+          .doctor-dark-theme .btn-outline { border-color: var(--border); color: var(--text); }
+          .doctor-dark-theme .field-input { background: var(--surface); color: var(--text); border-color: var(--border); }
+          .doctor-dark-theme .data-table th { color: var(--text-dim); border-color: var(--border); }
+          .doctor-dark-theme .data-table td { border-color: var(--border); }
+        `}</style>
+      )}
       <div className="portal-container">
         <div className="portal-header">
           <div>
@@ -1223,6 +1277,9 @@ function DoctorPortal({ room: roomProp }) {
             <div className="status-pill" style={{ background: statusColor(status) + "22", color: statusColor(status) }}>
               {status}
             </div>
+            <button className="btn btn-outline btn-sm" onClick={toggleDocTheme} title="Toggle theme">
+              {docTheme === "light" ? "🌙 Dark" : "☀️ Light"}
+            </button>
           </div>
         </div>
 
@@ -1258,6 +1315,7 @@ function DoctorPortal({ room: roomProp }) {
             <button className="btn btn-blue" onClick={nextToken}>⏭ Next</button>
             <button className="btn btn-outline" onClick={prevToken}>⏮ Previous</button>
             <button className="btn btn-outline" onClick={recall}>↩ Recall</button>
+            <button className="btn btn-outline" onClick={noShow} style={{ color: "#f97316", borderColor: "#f9731644" }}>⊘ No Show</button>
           </div>
 
           <div className="action-section-title">Advanced</div>
@@ -1278,12 +1336,31 @@ function DoctorPortal({ room: roomProp }) {
           {nowServing != null && (() => {
             const current = patients.find((p) => p.token === nowServing);
             return (
-              <div style={{ background: "#22c55e12", border: "1px solid #22c55e33", borderRadius: "12px", padding: "1rem 1.25rem", marginBottom: "1rem", display: "flex", alignItems: "center", gap: "1.25rem" }}>
+              <div style={{ background: "#22c55e12", border: "1px solid #22c55e33", borderRadius: "12px", padding: "1rem 1.25rem", marginBottom: "1rem", display: "flex", alignItems: "center", gap: "1.25rem", flexWrap: "wrap" }}>
                 <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "3rem", fontWeight: 800, color: "#22c55e", lineHeight: 1, minWidth: "60px", textAlign: "center" }}>{nowServing}</div>
-                <div>
+                <div style={{ flex: 1, minWidth: "160px" }}>
                   <div style={{ fontSize: "0.7rem", fontWeight: 700, letterSpacing: "0.1em", color: "#22c55e", marginBottom: "0.2rem" }}>NOW SERVING</div>
                   <div style={{ fontWeight: 600, fontSize: "1.05rem" }}>{current?.name || "—"}</div>
                   <div className="dim" style={{ fontSize: "0.8rem" }}>{current?.patientId || ""}</div>
+                  {current && (
+                    <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap", marginTop: "0.4rem" }}>
+                      {current.patientCategory && current.patientCategory !== "General" && (
+                        <span className="status-pill" style={{ background: "#a855f722", color: "#a855f7", fontSize: "0.7rem" }}>
+                          {current.patientCategory}
+                        </span>
+                      )}
+                      {current.consultationType === "Online" && (
+                        <span className="status-pill" style={{ background: "#0ea5e922", color: "#0ea5e9", fontSize: "0.7rem" }}>
+                          Online
+                        </span>
+                      )}
+                      {current.isFollowUp && (
+                        <span className="status-pill" style={{ background: "#eab30822", color: "#eab308", fontSize: "0.7rem" }}>
+                          Follow-up
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
             );
@@ -1295,21 +1372,23 @@ function DoctorPortal({ room: roomProp }) {
             <div className="table-wrap">
               <table className="data-table">
                 <thead>
-                  <tr><th>#</th><th>Patient</th><th>ID</th><th>Status</th><th></th></tr>
+                  <tr><th>#</th><th>Patient</th><th>ID</th><th>Tags</th><th>Status</th><th></th></tr>
                 </thead>
                 <tbody>
                   {patients.map((p) => {
                     const isCurrent = p.token === nowServing;
                     const isNext = p.token === upNext;
                     const isServed = p.status === "served";
+                    const isMissed = p.status === "missed";
                     const isCancelled = p.status === "cancelled" || p.status === "cleared";
+                    const isDimmed = isServed || isCancelled;
                     return (
                       <tr key={p.id} style={{
-                        background: isCurrent ? "#22c55e12" : isNext ? "#3b82f612" : "transparent",
-                        opacity: isServed || isCancelled ? 0.4 : 1,
+                        background: isCurrent ? "#22c55e12" : isNext ? "#3b82f612" : isMissed ? "#f9731612" : "transparent",
+                        opacity: isDimmed ? 0.4 : 1,
                       }}>
                         <td>
-                          <span style={{ fontWeight: 700, fontSize: "1rem", color: isCurrent ? "#22c55e" : isNext ? "#3b82f6" : "inherit" }}>
+                          <span style={{ fontWeight: 700, fontSize: "1rem", color: isCurrent ? "#22c55e" : isNext ? "#3b82f6" : isMissed ? "#f97316" : "inherit" }}>
                             {p.token ?? "—"}
                             {isCurrent && " ●"}
                           </span>
@@ -1317,15 +1396,36 @@ function DoctorPortal({ room: roomProp }) {
                         <td style={{ fontWeight: isCurrent ? 600 : 400 }}>{p.name}</td>
                         <td className="mono" style={{ fontSize: "0.8rem" }}>{p.patientId || "—"}</td>
                         <td>
+                          <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
+                            {p.patientCategory && p.patientCategory !== "General" && (
+                              <span className="status-pill" style={{ background: "#a855f722", color: "#a855f7", fontSize: "0.68rem" }}>
+                                {p.patientCategory}
+                              </span>
+                            )}
+                            {p.consultationType === "Online" && (
+                              <span className="status-pill" style={{ background: "#0ea5e922", color: "#0ea5e9", fontSize: "0.68rem" }}>
+                                Online
+                              </span>
+                            )}
+                            {p.isFollowUp && (
+                              <span className="status-pill" style={{ background: "#eab30822", color: "#eab308", fontSize: "0.68rem" }}>
+                                Follow-up
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td>
                           <span className="status-pill" style={{
-                            background: isServed ? "#64748b22" : isCancelled ? "#ef444422" : isCurrent ? "#22c55e22" : isNext ? "#3b82f622" : "#64748b11",
-                            color: isServed ? "#64748b" : isCancelled ? "#ef4444" : isCurrent ? "#22c55e" : isNext ? "#3b82f6" : "var(--text-dim)",
+                            background: isServed ? "#64748b22" : isCancelled ? "#ef444422" : isMissed ? "#f9731622" : isCurrent ? "#22c55e22" : isNext ? "#3b82f622" : "#64748b11",
+                            color: isServed ? "#64748b" : isCancelled ? "#ef4444" : isMissed ? "#f97316" : isCurrent ? "#22c55e" : isNext ? "#3b82f6" : "var(--text-dim)",
                           }}>
-                            {isServed ? "✓ Served" : isCancelled ? "Cancelled" : isCurrent ? "Now" : isNext ? "Next" : "Waiting"}
+                            {isServed ? "✓ Served" : isCancelled ? "Cancelled" : isMissed ? "Missed" : isCurrent ? "Now" : isNext ? "Next" : "Waiting"}
                           </span>
                         </td>
                         <td>
-                          {!isServed && !isCancelled && (
+                          {isMissed ? (
+                            <button className="btn btn-outline btn-sm" onClick={() => recallPatient(p)}>↻ Call again</button>
+                          ) : !isServed && !isCancelled && (
                             <button className="btn btn-outline btn-sm" onClick={() => markServed(p.id)}>✓ Done</button>
                           )}
                         </td>
@@ -1819,21 +1919,27 @@ async function rebuildDoctorDirectory(people, state, setState, setStaff) {
         email: d.email || "",
         contact: "",
         category: "doctor",
-        active: true,
+        active: d.active !== false, // carry over legacy active flag
         role: d.email ? "DOCTOR" : null, // assume they have a login if they have an email
       });
       staffChanged = true;
-      // Also add to directory now that they're in staff
-      const key = d.email
-        ? "doc_" + d.email.replace(/[^a-zA-Z0-9]/g, "_")
-        : "doc_" + d.name.replace(/[^a-zA-Z0-9]/g, "_");
-      if (!dir[key]) {
-        dir[key] = { ...d, id: key, active: true };
+      if (d.active !== false) {
+        const key = d.email
+          ? "doc_" + d.email.replace(/[^a-zA-Z0-9]/g, "_")
+          : "doc_" + d.name.replace(/[^a-zA-Z0-9]/g, "_");
+        if (!dir[key]) dir[key] = { ...d, id: key, active: true };
       }
-    } else if (!dir[d.id] && d.active !== false) {
-      // Keep entries already correctly represented but with a different key
-      if (inStaff && inStaff.category === "doctor" && inStaff.active !== false) {
-        // Already covered by the staff-based build above under a possibly different key — skip duplicate
+    } else if (inStaff && d.active === false && inStaff.active !== false) {
+      // Legacy inactive flag on the old directory entry wasn't reflected in staff — sync it
+      const idx = staffList.findIndex((p) => p === inStaff);
+      if (idx >= 0) {
+        staffList[idx] = { ...staffList[idx], active: false };
+        staffChanged = true;
+        // Remove from the freshly-built dir if it got included
+        const key = inStaff.email
+          ? "doc_" + inStaff.email.replace(/[^a-zA-Z0-9]/g, "_")
+          : "doc_" + inStaff.name.replace(/[^a-zA-Z0-9]/g, "_");
+        delete dir[key];
       }
     }
   });
@@ -2629,7 +2735,7 @@ function PatientRecordsTab() {
   const [idInput, setIdInput] = useState("");
   const [phase, setPhase] = useState("search"); // search | found | notfound | editing
   const [patient, setPatient] = useState(null);
-  const [form, setForm] = useState({ idNumber: "", name: "", mobile: "", dob: "", sex: "", address: "", notes: "" });
+  const [form, setForm] = useState({ idNumber: "", name: "", mobile: "", dob: "", sex: "", category: "General", address: "", notes: "" });
   const [msg, setMsg] = useState("");
   const [searching, setSearching] = useState(false);
 
@@ -2642,7 +2748,7 @@ function PatientRecordsTab() {
       if (snap.exists()) {
         const p = { id: snap.id, ...snap.data() };
         setPatient(p);
-        setForm({ idNumber: p.idNumber || id, name: p.name || "", mobile: p.mobile || "", dob: p.dob || "", sex: p.sex || "", address: p.address || "", notes: p.notes || "" });
+        setForm({ idNumber: p.idNumber || id, name: p.name || "", mobile: p.mobile || "", dob: p.dob || "", sex: p.sex || "", category: p.category || "General", address: p.address || "", notes: p.notes || "" });
         setPhase("found");
       } else {
         setForm({ idNumber: id, name: "", mobile: "", dob: "", sex: "", address: "", notes: "" });
@@ -2759,6 +2865,17 @@ function PatientFormFields({ form, setForm, lockId }) {
         </div>
       </div>
       <div className="field-group">
+        <label className="field-label">Patient Category</label>
+        <select className="field-input" value={form.category || "General"} onChange={(e) => setForm({ ...form, category: e.target.value })}>
+          <option value="General">General</option>
+          <option value="Police">Police</option>
+          <option value="Police EXO">Police EXO</option>
+          <option value="Police Family">Police Family</option>
+          <option value="Emergency">Emergency</option>
+          <option value="Police Custody">Police Custody</option>
+        </select>
+      </div>
+      <div className="field-group">
         <label className="field-label">Address</label>
         <input className="field-input" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
       </div>
@@ -2776,9 +2893,14 @@ function PatientFormFields({ form, setForm, lockId }) {
 function BookAppointmentTab({ state }) {
   const [idInput, setIdInput] = useState("");
   const [phase, setPhase] = useState("lookup"); // lookup | newpatient | book
-  const [patientForm, setPatientForm] = useState({ idNumber: "", name: "", mobile: "", dob: "", sex: "", address: "", notes: "" });
+  const [patientForm, setPatientForm] = useState({ idNumber: "", name: "", mobile: "", dob: "", sex: "", category: "General", address: "", notes: "" });
   const [doctorId, setDoctorId] = useState("");
   const [apptDate, setApptDate] = useState(new Date().toISOString().slice(0, 10));
+  const [consultationType, setConsultationType] = useState("Walk-in");
+  const [isFollowUp, setIsFollowUp] = useState(false);
+  const [lastVisitInfo, setLastVisitInfo] = useState(null);
+  const [editingPatient, setEditingPatient] = useState(false);
+  const [editSaving, setEditSaving] = useState(false);
   const [lookupMsg, setLookupMsg] = useState("");
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
@@ -2795,16 +2917,30 @@ function BookAppointmentTab({ state }) {
   const lookup = async () => {
     const id = idInput.trim();
     if (!id) return;
-    setLookupMsg("Searching…"); setMsg("");
+    setLookupMsg("Searching…"); setMsg(""); setLastVisitInfo(null);
+    setEditingPatient(false); setConsultationType("Walk-in"); setIsFollowUp(false);
+    setDoctorId(""); setLastTicket(null);
     try {
       const snap = await getDoc(doc(db, "clinicq_patients", id));
       if (snap.exists()) {
         const p = snap.data();
-        setPatientForm({ idNumber: id, name: p.name || "", mobile: p.mobile || "", dob: p.dob || "", sex: p.sex || "", address: p.address || "", notes: p.notes || "" });
+        setPatientForm({ idNumber: id, name: p.name || "", mobile: p.mobile || "", dob: p.dob || "", sex: p.sex || "", category: p.category || "General", address: p.address || "", notes: p.notes || "" });
         setLookupMsg(`✓ Returning patient — ${p.name}`);
         setPhase("book");
+        // Fetch most recent visit for follow-up context
+        try {
+          const q = query(VISITS_COL, where("patientId", "==", id), orderBy("createdAt", "desc"), limit(1));
+          const visitSnap = await getDocs(q);
+          if (!visitSnap.empty) {
+            const lastVisit = visitSnap.docs[0].data();
+            const lastDate = new Date(lastVisit.createdAt);
+            const daysAgo = Math.floor((Date.now() - lastVisit.createdAt) / 86400000);
+            setLastVisitInfo({ date: lastVisit.date, daysAgo, doctorName: lastVisit.doctorName });
+            if (daysAgo <= 5) setIsFollowUp(true);
+          }
+        } catch {}
       } else {
-        setPatientForm({ idNumber: id, name: "", mobile: "", dob: "", sex: "", address: "", notes: "" });
+        setPatientForm({ idNumber: id, name: "", mobile: "", dob: "", sex: "", category: "General", address: "", notes: "" });
         setLookupMsg("");
         setPhase("newpatient");
       }
@@ -2824,6 +2960,19 @@ function BookAppointmentTab({ state }) {
     finally { setBusy(false); }
   };
 
+  const saveEdit = async () => {
+    if (!patientForm.name.trim()) { setMsg("Name is required."); return; }
+    setEditSaving(true);
+    try {
+      await setDoc(doc(db, "clinicq_patients", patientForm.idNumber.trim()), {
+        ...patientForm, idNumber: patientForm.idNumber.trim(), updatedAt: Date.now(),
+      }, { merge: true });
+      setMsg("✓ Patient details updated.");
+      setEditingPatient(false);
+    } catch (e) { setMsg("Update failed: " + e.message); }
+    finally { setEditSaving(false); }
+  };
+
   const book = async () => {
     if (!doctorId) { setMsg("Please select a doctor."); return; }
     const doctor = state.doctorDirectory[doctorId];
@@ -2839,12 +2988,14 @@ function BookAppointmentTab({ state }) {
       await addDoc(VISITS_COL, {
         patientId: id, name: patientForm.name.trim(), room, doctorId,
         doctorName: doctor.name, token, date: apptDate, status: "waiting", createdAt: now,
+        patientCategory: patientForm.category || "General",
+        consultationType, isFollowUp,
       });
       const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       setLastTicket({ token, room, doctorId, doctorName: doctor.name, name: patientForm.name.trim(), date: apptDate, time: timeStr });
       setMsg(`✓ ${patientForm.name.trim()} booked — Token ${token} · ${doctor.name} · ${apptDate}`);
-      setIdInput(""); setPatientForm({ idNumber: "", name: "", mobile: "", dob: "", sex: "", address: "", notes: "" });
-      setDoctorId(""); setPhase("lookup"); setLookupMsg("");
+      setIdInput(""); setPatientForm({ idNumber: "", name: "", mobile: "", dob: "", sex: "", category: "General", address: "", notes: "" });
+      setDoctorId(""); setPhase("lookup"); setLookupMsg(""); setConsultationType("Walk-in"); setIsFollowUp(false); setLastVisitInfo(null);
     } catch (e) { setMsg("Booking failed: " + e.message); }
     finally { setBusy(false); }
   };
@@ -2884,18 +3035,14 @@ function BookAppointmentTab({ state }) {
       <div className="card">
         <h2 className="card-title">Book Appointment</h2>
 
-        {/* Step 1: ID lookup */}
+        {/* Step 1: Search patient */}
         <div className="field-group">
-          <label className="field-label">Step 1 — Patient ID / Passport</label>
+          <label className="field-label">Patient ID / Passport</label>
           <div style={{ display: "flex", gap: "0.5rem" }}>
-            <input className="field-input" placeholder="Enter ID then press Look up" value={idInput}
+            <input className="field-input" placeholder="Type ID and press Enter or Search" value={idInput}
               onChange={(e) => setIdInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && lookup()}
-              disabled={phase !== "lookup"} />
-            {phase === "lookup"
-              ? <button className="btn btn-blue" onClick={lookup}>Look up</button>
-              : <button className="btn btn-outline" onClick={() => { setPhase("lookup"); setIdInput(""); setMsg(""); setLookupMsg(""); }}>Change</button>
-            }
+              onKeyDown={(e) => e.key === "Enter" && lookup()} />
+            <button className="btn btn-blue" onClick={lookup}>🔍 Search</button>
           </div>
           {lookupMsg && <div style={{ fontSize: "0.8rem", marginTop: "0.4rem", color: lookupMsg.startsWith("✓") ? "var(--green)" : "var(--text-dim)" }}>{lookupMsg}</div>}
         </div>
@@ -2914,11 +3061,26 @@ function BookAppointmentTab({ state }) {
         {/* Step 2: Book */}
         {phase === "book" && (
           <div>
-            <div style={{ padding: "0.75rem", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: "8px", marginBottom: "1rem", fontSize: "0.85rem" }}>
-              <strong>{patientForm.name}</strong> · {patientForm.idNumber}
-              {patientForm.dob && ` · Age ${computeAge(patientForm.dob)}`}
-              {patientForm.mobile && ` · ${patientForm.mobile}`}
-            </div>
+            {editingPatient ? (
+              <div style={{ padding: "1rem", background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: "8px", marginBottom: "1rem" }}>
+                <div style={{ fontWeight: 600, marginBottom: "0.75rem", fontSize: "0.9rem" }}>Edit patient details</div>
+                <PatientFormFields form={patientForm} setForm={setPatientForm} lockId />
+                <div className="btn-group" style={{ marginTop: "0.5rem" }}>
+                  <button className="btn btn-green" onClick={saveEdit} disabled={editSaving}>{editSaving ? "Saving…" : "Save changes"}</button>
+                  <button className="btn btn-outline" onClick={() => setEditingPatient(false)}>Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ padding: "0.75rem", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: "8px", marginBottom: "1rem", fontSize: "0.85rem", display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.5rem" }}>
+                <div>
+                  <strong>{patientForm.name}</strong> · {patientForm.idNumber}
+                  {patientForm.dob && ` · Age ${computeAge(patientForm.dob)}`}
+                  {patientForm.mobile && ` · ${patientForm.mobile}`}
+                  {patientForm.category && patientForm.category !== "General" && ` · ${patientForm.category}`}
+                </div>
+                <button className="btn btn-outline btn-sm" onClick={() => setEditingPatient(true)}>✏️ Edit</button>
+              </div>
+            )}
             <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
               <div className="field-group" style={{ flex: 1, minWidth: "200px" }}>
                 <label className="field-label">Step 2 — Select Doctor *</label>
@@ -2942,6 +3104,30 @@ function BookAppointmentTab({ state }) {
               <div className="field-group" style={{ flex: "0 0 160px" }}>
                 <label className="field-label">Appointment Date</label>
                 <input type="date" className="field-input" value={apptDate} onChange={(e) => setApptDate(e.target.value)} />
+              </div>
+            </div>
+
+            {/* Consultation type + Follow-up */}
+            <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", marginTop: "0.5rem", alignItems: "flex-start" }}>
+              <div className="field-group" style={{ flex: "0 0 200px" }}>
+                <label className="field-label">Consultation Type</label>
+                <div style={{ display: "flex", gap: "0.4rem" }}>
+                  <button type="button" className={`btn btn-sm ${consultationType === "Walk-in" ? "btn-blue" : "btn-outline"}`} style={{ flex: 1 }} onClick={() => setConsultationType("Walk-in")}>Walk-in</button>
+                  <button type="button" className={`btn btn-sm ${consultationType === "Online" ? "btn-blue" : "btn-outline"}`} style={{ flex: 1 }} onClick={() => setConsultationType("Online")}>Online</button>
+                </div>
+              </div>
+              <div className="field-group" style={{ flex: 1, minWidth: "220px" }}>
+                <label className="field-label">&nbsp;</label>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.85rem", cursor: "pointer", padding: "0.45rem 0" }}>
+                  <input type="checkbox" checked={isFollowUp} onChange={(e) => setIsFollowUp(e.target.checked)} />
+                  Follow-up visit
+                </label>
+                {lastVisitInfo && (
+                  <div style={{ fontSize: "0.78rem", color: "var(--text-dim)", marginTop: "0.1rem" }}>
+                    Last visit: {lastVisitInfo.daysAgo === 0 ? "today" : `${lastVisitInfo.daysAgo} day${lastVisitInfo.daysAgo === 1 ? "" : "s"} ago`}
+                    {lastVisitInfo.doctorName ? ` with ${lastVisitInfo.doctorName}` : ""}
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -3315,7 +3501,7 @@ function PatientImportTab() {
    PATIENT REGISTRATION — Admin / Receptionist
 ───────────────────────────────────────────── */
 function PatientRegistration({ state }) {
-  const blank = { idNumber: "", name: "", mobile: "", dob: "", sex: "", address: "", notes: "" };
+  const blank = { idNumber: "", name: "", mobile: "", dob: "", sex: "", category: "General", address: "", notes: "" };
   const [form, setForm] = useState(blank);
   const [room, setRoom] = useState("");
   const [lookupMsg, setLookupMsg] = useState("");
@@ -3352,7 +3538,7 @@ function PatientRegistration({ state }) {
       const snap = await getDoc(doc(db, "clinicq_patients", id));
       if (snap.exists()) {
         const p = snap.data();
-        setForm({ idNumber: id, name: p.name || "", mobile: p.mobile || "", dob: p.dob || "", sex: p.sex || "", address: p.address || "", notes: p.notes || "" });
+        setForm({ idNumber: id, name: p.name || "", mobile: p.mobile || "", dob: p.dob || "", sex: p.sex || "", category: p.category || "General", address: p.address || "", notes: p.notes || "" });
         setLookupMsg("✓ Returning patient — details loaded.");
       } else {
         setLookupMsg("New patient — fill in details below.");
@@ -4081,12 +4267,13 @@ body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--t
 
 /* Grid */
 .lobby-grid { display: grid; gap: 1.25rem; flex: 1; align-content: start; }
-.lobby-grid-1 { grid-template-columns: 1fr; max-width: 600px; margin: 0 auto; }
-.lobby-grid-2 { grid-template-columns: repeat(2, 1fr); }
-.lobby-grid-3 { grid-template-columns: repeat(3, 1fr); }
-.lobby-grid-4 { grid-template-columns: repeat(4, 1fr); }
+/* Use a consistent 4-column reference width regardless of room count,
+   so a single room's card matches the size it would be in a full grid,
+   and stays left-aligned rather than centered/stretched. */
+.lobby-grid-1, .lobby-grid-2, .lobby-grid-3, .lobby-grid-4 { grid-template-columns: repeat(4, 1fr); }
+.lobby-grid-1 > *, .lobby-grid-2 > *, .lobby-grid-3 > * { grid-column: span 1; }
 @media (max-width: 900px) {
-  .lobby-grid-3, .lobby-grid-4 { grid-template-columns: repeat(2, 1fr); }
+  .lobby-grid-1, .lobby-grid-2, .lobby-grid-3, .lobby-grid-4 { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 600px) {
   .lobby { padding: 1rem 1rem 0; }
