@@ -35,7 +35,7 @@ import {
 import { db, storage, APP_URL, functions } from "./firebase.js";
 import { httpsCallable } from "firebase/functions";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
-import { initCredentials, verifyLogin, changePassword, addRoomCredential, removeRoomCredential, fetchCredentials, onAuthChange, logout as logout_, signInWithGoogle, completeGoogleRedirect } from "./auth.js";
+import { initCredentials, verifyLogin, addRoomCredential, removeRoomCredential, onAuthChange, logout as logout_, signInWithGoogle, completeGoogleRedirect } from "./auth.js";
 
 const CONFIG_DOC = doc(db, "clinicq", "config");
 const ROOMS_COL = collection(db, "clinicq_rooms");
@@ -110,13 +110,13 @@ async function pushRoom(roomId, roomData) {
 }
 
 async function deleteRoomDoc(roomId) {
-  try { await deleteDoc(roomDoc(roomId)); } catch {}
+  try { await deleteDoc(roomDoc(roomId)); } catch (e) { console.warn("deleteRoomDoc:", e.message); }
 }
 
 async function logAudit(entry) {
   try {
     await addDoc(AUDIT_COL, { ...entry, ts: serverTimestamp() });
-  } catch {}
+  } catch (e) { console.warn("logAudit:", e.message); }
 }
 
 /* ─────────────────────────────────────────────
@@ -826,51 +826,6 @@ function LoginPage({ navigate }) {
    ADMIN LOGIN — Developer + Admin (Google only)
    URL: /login (same as staff)
 ───────────────────────────────────────────── */
-function AdminLoginPage() {
-  const [err, setErr] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  const handleGoogleSignIn = async () => {
-    setErr(""); setLoading(true);
-    try {
-      const r = await signInWithGoogle();
-      if (r?.redirecting) return;
-      if (!r?.success) setErr(r?.error || "Access denied. Make sure your Google account has been added as an Admin by the Developer.");
-    } catch (e) {
-      setErr(e.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <div className="portal-bg">
-      <div className="login-card">
-        <div className="login-logo">
-          <span className="lobby-pulse" style={{ width: 10, height: 10 }} />
-          {CLINIC_NAME}
-        </div>
-        <h2 className="login-title">Admin Sign in</h2>
-        <p className="dim" style={{ fontSize: "0.85rem", marginBottom: "1.25rem" }}>
-          Sign in with your authorised Google account to access the admin portal.
-        </p>
-        {err && <div className="login-err">{err}</div>}
-        <button className="btn btn-google w-full" onClick={handleGoogleSignIn} disabled={loading}>
-          <svg width="18" height="18" viewBox="0 0 18 18" style={{ marginRight: "8px" }}>
-            <path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z"/>
-            <path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/>
-            <path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/>
-            <path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/>
-          </svg>
-          {loading ? "Signing in…" : "Sign in with Google"}
-        </button>
-        <div className="dim" style={{ fontSize: "0.75rem", textAlign: "center", marginTop: "0.75rem" }}>
-          Access restricted to authorised accounts only.
-        </div>
-      </div>
-    </div>
-  );
-}
 
 /* ─────────────────────────────────────────────
    DOCTOR PORTAL
@@ -1322,7 +1277,10 @@ function DoctorPortal({ room: roomProp }) {
                 <div style={{ flex: 1, minWidth: "160px" }}>
                   <div style={{ fontSize: "0.7rem", fontWeight: 700, letterSpacing: "0.1em", color: "#22c55e", marginBottom: "0.2rem" }}>NOW SERVING</div>
                   <div style={{ fontWeight: 600, fontSize: "1.05rem" }}>{current?.name || "—"}</div>
-                  <div className="dim" style={{ fontSize: "0.8rem" }}>{current?.patientId || ""}</div>
+                  <div className="dim" style={{ fontSize: "0.8rem" }}>
+                    {current?.patientId || ""}
+                    {current?.policeServiceNo ? ` · Svc No: ${current.policeServiceNo}` : ""}
+                  </div>
                   {current && (
                     <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap", marginTop: "0.4rem" }}>
                       {current.patientCategory && current.patientCategory !== "General" && (
@@ -1375,7 +1333,10 @@ function DoctorPortal({ room: roomProp }) {
                           </span>
                         </td>
                         <td style={{ fontWeight: isCurrent ? 600 : 400 }}>{p.name}</td>
-                        <td className="mono" style={{ fontSize: "0.8rem" }}>{p.patientId || "—"}</td>
+                        <td className="mono" style={{ fontSize: "0.8rem" }}>
+                          <div>{p.patientId || "—"}</div>
+                          {p.policeServiceNo && <div className="dim" style={{ fontSize: "0.72rem" }}>Svc: {p.policeServiceNo}</div>}
+                        </td>
                         <td>
                           <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
                             {p.patientCategory && p.patientCategory !== "General" && (
@@ -1611,8 +1572,11 @@ function StaffLoginsTab() {
     try {
       const { sendPasswordResetEmail } = await import("firebase/auth");
       const { auth } = await import("./firebase.js");
-      await sendPasswordResetEmail(auth, person.email);
-      setMsg((m) => ({ ...m, [person.email]: "✓ Reset email sent." }));
+      await sendPasswordResetEmail(auth, person.email, {
+        url: `${APP_URL}/login`,
+        handleCodeInApp: false,
+      });
+      setMsg((m) => ({ ...m, [person.email]: "✓ Reset email sent to " + person.email }));
     } catch (e) {
       setMsg((m) => ({ ...m, [person.email]: "Failed: " + e.message }));
     } finally { setBusy(null); }
@@ -2185,7 +2149,10 @@ function StaffDirectoryTab({ state, setState }) {
       try {
         const { sendPasswordResetEmail } = await import("firebase/auth");
         const { auth } = await import("./firebase.js");
-        await sendPasswordResetEmail(auth, person.email);
+        await sendPasswordResetEmail(auth, person.email, {
+          url: `${APP_URL}/login`,
+          handleCodeInApp: false,
+        });
       } catch (mailErr) {
         setMsg(`✓ ${person.name} is now ${role}, but the setup email failed: ${mailErr.message}. They can use "Forgot password" on the login page.`);
         setRoleBusy(null);
@@ -2716,7 +2683,7 @@ function PatientRecordsTab() {
   const [idInput, setIdInput] = useState("");
   const [phase, setPhase] = useState("search"); // search | found | notfound | editing
   const [patient, setPatient] = useState(null);
-  const [form, setForm] = useState({ idNumber: "", name: "", mobile: "", dob: "", sex: "", category: "General", address: "", notes: "" });
+  const [form, setForm] = useState({ idNumber: "", name: "", mobile: "", dob: "", sex: "", category: "General", policeServiceNo: "", address: "", notes: "" });
   const [msg, setMsg] = useState("");
   const [searching, setSearching] = useState(false);
 
@@ -2729,7 +2696,7 @@ function PatientRecordsTab() {
       if (snap.exists()) {
         const p = { id: snap.id, ...snap.data() };
         setPatient(p);
-        setForm({ idNumber: p.idNumber || id, name: p.name || "", mobile: p.mobile || "", dob: p.dob || "", sex: p.sex || "", category: p.category || "General", address: p.address || "", notes: p.notes || "" });
+        setForm({ idNumber: p.idNumber || id, name: p.name || "", mobile: p.mobile || "", dob: p.dob || "", sex: p.sex || "", category: p.category || "General", policeServiceNo: p.policeServiceNo || "", address: p.address || "", notes: p.notes || "" });
         setPhase("found");
       } else {
         setForm({ idNumber: id, name: "", mobile: "", dob: "", sex: "", address: "", notes: "" });
@@ -2856,6 +2823,19 @@ function PatientFormFields({ form, setForm, lockId }) {
           <option value="Police Custody">Police Custody</option>
         </select>
       </div>
+      {["Police", "Police EXO", "Police Family", "Police Custody", "Emergency"].includes(form.category) && (
+        <div className="field-group">
+          <label className="field-label">Police Service No <span className="dim" style={{ fontWeight: 400 }}>(4-digit)</span></label>
+          <input
+            className="field-input"
+            style={{ maxWidth: "140px" }}
+            maxLength={4}
+            placeholder="e.g. 1234"
+            value={form.policeServiceNo || ""}
+            onChange={(e) => setForm({ ...form, policeServiceNo: e.target.value.replace(/\D/g, "").slice(0, 4) })}
+          />
+        </div>
+      )}
       <div className="field-group">
         <label className="field-label">Address</label>
         <input className="field-input" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
@@ -2874,7 +2854,7 @@ function PatientFormFields({ form, setForm, lockId }) {
 function BookAppointmentTab({ state }) {
   const [idInput, setIdInput] = useState("");
   const [phase, setPhase] = useState("lookup"); // lookup | newpatient | book
-  const [patientForm, setPatientForm] = useState({ idNumber: "", name: "", mobile: "", dob: "", sex: "", category: "General", address: "", notes: "" });
+  const [patientForm, setPatientForm] = useState({ idNumber: "", name: "", mobile: "", dob: "", sex: "", category: "General", policeServiceNo: "", address: "", notes: "" });
   const [doctorId, setDoctorId] = useState("");
   const [apptDate, setApptDate] = useState(new Date().toISOString().slice(0, 10));
   const [consultationType, setConsultationType] = useState("Walk-in");
@@ -2905,7 +2885,7 @@ function BookAppointmentTab({ state }) {
       const snap = await getDoc(doc(db, "clinicq_patients", id));
       if (snap.exists()) {
         const p = snap.data();
-        setPatientForm({ idNumber: id, name: p.name || "", mobile: p.mobile || "", dob: p.dob || "", sex: p.sex || "", category: p.category || "General", address: p.address || "", notes: p.notes || "" });
+        setPatientForm({ idNumber: id, name: p.name || "", mobile: p.mobile || "", dob: p.dob || "", sex: p.sex || "", category: p.category || "General", policeServiceNo: p.policeServiceNo || "", address: p.address || "", notes: p.notes || "" });
         setLookupMsg(`✓ Returning patient — ${p.name}`);
         setPhase("book");
         // Fetch most recent visit for follow-up context
@@ -2919,7 +2899,7 @@ function BookAppointmentTab({ state }) {
             setLastVisitInfo({ date: lastVisit.date, daysAgo, doctorName: lastVisit.doctorName });
             if (daysAgo <= 5) setIsFollowUp(true);
           }
-        } catch {}
+        } catch (e) { console.warn("lastVisit lookup:", e.message); }
       } else {
         setPatientForm({ idNumber: id, name: "", mobile: "", dob: "", sex: "", category: "General", address: "", notes: "" });
         setLookupMsg("");
@@ -2970,12 +2950,13 @@ function BookAppointmentTab({ state }) {
         patientId: id, name: patientForm.name.trim(), room, doctorId,
         doctorName: doctor.name, token, date: apptDate, status: "waiting", createdAt: now,
         patientCategory: patientForm.category || "General",
+        policeServiceNo: patientForm.policeServiceNo || "",
         consultationType, isFollowUp,
       });
       const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       setLastTicket({ token, room, doctorId, doctorName: doctor.name, name: patientForm.name.trim(), date: apptDate, time: timeStr });
       setMsg(`✓ ${patientForm.name.trim()} booked — Token ${token} · ${doctor.name} · ${apptDate}`);
-      setIdInput(""); setPatientForm({ idNumber: "", name: "", mobile: "", dob: "", sex: "", category: "General", address: "", notes: "" });
+      setIdInput(""); setPatientForm({ idNumber: "", name: "", mobile: "", dob: "", sex: "", category: "General", policeServiceNo: "", address: "", notes: "" });
       setDoctorId(""); setPhase("lookup"); setLookupMsg(""); setConsultationType("Walk-in"); setIsFollowUp(false); setLastVisitInfo(null);
     } catch (e) { setMsg("Booking failed: " + e.message); }
     finally { setBusy(false); }
@@ -3159,7 +3140,10 @@ function ActiveAppointmentsTab({ state }) {
         return (a.token || 0) - (b.token || 0);
       });
       setVisits(list);
-    } catch {}
+    } catch (e) {
+      console.warn("loadVisits:", e.message);
+      setMsg("Could not load appointments: " + e.message);
+    }
   };
   useEffect(() => { load(); }, [viewDate]);
 
@@ -3481,376 +3465,6 @@ function PatientImportTab() {
 /* ─────────────────────────────────────────────
    PATIENT REGISTRATION — Admin / Receptionist
 ───────────────────────────────────────────── */
-function PatientRegistration({ state }) {
-  const blank = { idNumber: "", name: "", mobile: "", dob: "", sex: "", category: "General", address: "", notes: "" };
-  const [form, setForm] = useState(blank);
-  const [room, setRoom] = useState("");
-  const [lookupMsg, setLookupMsg] = useState("");
-  const [msg, setMsg] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [lastTicket, setLastTicket] = useState(null); // for printing
-  const [todayVisits, setTodayVisits] = useState([]);
-
-  const assignedRooms = (state.rooms || []).filter((r) => state.assigned[r]);
-
-  const loadToday = async () => {
-    const today = new Date().toISOString().slice(0, 10);
-    try {
-      const q = query(VISITS_COL, where("date", "==", today), orderBy("createdAt", "desc"), limit(50));
-      const snap = await getDocs(q);
-      setTodayVisits(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-    } catch {
-      // composite index may be building; fall back to unordered
-      try {
-        const q2 = query(VISITS_COL, where("date", "==", today));
-        const snap2 = await getDocs(q2);
-        setTodayVisits(snap2.docs.map((d) => ({ id: d.id, ...d.data() })));
-      } catch {}
-    }
-  };
-  useEffect(() => { loadToday(); }, []);
-
-  // Look up returning patient by ID
-  const lookup = async () => {
-    const id = form.idNumber.trim();
-    if (!id) return;
-    setLookupMsg("Searching…");
-    try {
-      const snap = await getDoc(doc(db, "clinicq_patients", id));
-      if (snap.exists()) {
-        const p = snap.data();
-        setForm({ idNumber: id, name: p.name || "", mobile: p.mobile || "", dob: p.dob || "", sex: p.sex || "", category: p.category || "General", address: p.address || "", notes: p.notes || "" });
-        setLookupMsg("✓ Returning patient — details loaded.");
-      } else {
-        setLookupMsg("New patient — fill in details below.");
-      }
-    } catch (e) {
-      setLookupMsg("Lookup failed: " + e.message);
-    }
-  };
-
-  const register = async () => {
-    if (!form.name.trim()) { setMsg("✕ Name is required."); return; }
-    if (!form.idNumber.trim()) { setMsg("✕ ID/Passport is required."); return; }
-    if (!room) { setMsg("✕ Please select a doctor/room."); return; }
-    setBusy(true); setMsg("");
-    try {
-      const id = form.idNumber.trim();
-      const today = new Date().toISOString().slice(0, 10);
-      const now = Date.now();
-
-      // Upsert patient master record
-      await setDoc(doc(db, "clinicq_patients", id), {
-        idNumber: id,
-        name: form.name.trim(),
-        mobile: form.mobile.trim(),
-        dob: form.dob,
-        sex: form.sex || "",
-        address: form.address.trim(),
-        notes: form.notes.trim(),
-        lastVisit: today,
-        updatedAt: now,
-      }, { merge: true });
-
-      // Assign next token for the room
-      const token = await nextTokenForRoom(room);
-      const doctorName = state.assigned[room]?.name || "";
-
-      // Create the visit
-      await addDoc(VISITS_COL, {
-        patientId: id,
-        name: form.name.trim(),
-        room,
-        doctorName,
-        token,
-        date: today,
-        status: "waiting",
-        createdAt: now,
-      });
-
-      setLastTicket({ token, room, doctorName, name: form.name.trim(), date: today, time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) });
-      setMsg(`✓ ${form.name.trim()} registered — token ${token} for ${room}.`);
-      setForm(blank);
-      setRoom("");
-      setLookupMsg("");
-      loadToday();
-    } catch (e) {
-      setMsg("Registration failed: " + e.message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const printTicket = async () => {
-    if (!lastTicket) return;
-    const t = lastTicket;
-    const trackUrl = `${APP_URL}/#track?token=${t.token}&room=${t.room}&doctor=${t.doctorId || ""}&date=${t.date}`;
-    const qrDataUrl = await generateQRDataURL(trackUrl);
-    const w = window.open("", "_blank", "width=320,height=500");
-    w.document.write(`<html><head><title>Token ${t.token}</title>
-      <style>
-        body{font-family:system-ui,sans-serif;text-align:center;padding:16px;max-width:280px;margin:0 auto;color:#000;background:#fff}
-        .clinic{font-size:14px;font-weight:700;margin-bottom:4px}
-        .token{font-size:80px;font-weight:900;margin:6px 0;line-height:1;color:#000}
-        .row{font-size:12px;margin:3px 0;color:#333}
-        .label{color:#888;font-size:9px;text-transform:uppercase;letter-spacing:1px}
-        hr{border:none;border-top:1px dashed #ccc;margin:8px 0}
-        img.qr{width:130px;height:130px;display:block;margin:8px auto}
-      </style></head><body>
-      <div class="clinic">${CLINIC_NAME}</div>
-      <hr/>
-      <div class="label">Token Number</div>
-      <div class="token">${t.token}</div>
-      <div class="row"><strong>${t.doctorName || roomDisplay(t.room)}</strong></div>
-      <div class="row">${t.date} &middot; ${t.time}</div>
-      <hr/>
-      ${qrDataUrl ? `<img class="qr" src="${qrDataUrl}" alt="QR"/>` : ""}
-      <div class="label">Scan to track your queue position</div>
-      <script>setTimeout(()=>window.print(),300);</script>
-      </body></html>`);
-    w.document.close();
-    w.focus();
-  };
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-      <div className="card">
-        <h2 className="card-title">Register Patient</h2>
-
-        <div className="field-group">
-          <label className="field-label">ID / Passport No *</label>
-          <div style={{ display: "flex", gap: "0.5rem" }}>
-            <input className="field-input" value={form.idNumber}
-              onChange={(e) => setForm({ ...form, idNumber: e.target.value })}
-              onBlur={lookup}
-              placeholder="Enter ID then press Tab to look up" />
-            <button className="btn btn-outline" onClick={lookup} type="button">Look up</button>
-          </div>
-          {lookupMsg && <div style={{ fontSize: "0.8rem", marginTop: "0.4rem", color: lookupMsg.startsWith("✓") ? "var(--green)" : "var(--text-dim)" }}>{lookupMsg}</div>}
-        </div>
-
-        <div className="field-group">
-          <label className="field-label">Full Name *</label>
-          <input className="field-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-        </div>
-
-        <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
-          <div className="field-group" style={{ flex: 1, minWidth: "140px" }}>
-            <label className="field-label">Mobile</label>
-            <input className="field-input" value={form.mobile} onChange={(e) => setForm({ ...form, mobile: e.target.value })} />
-          </div>
-          <div className="field-group" style={{ flex: 1, minWidth: "140px" }}>
-            <label className="field-label">Date of Birth {form.dob && computeAge(form.dob) !== "" ? `(age ${computeAge(form.dob)})` : ""}</label>
-            <input type="date" className="field-input" value={form.dob} onChange={(e) => setForm({ ...form, dob: e.target.value })} />
-          </div>
-          <div className="field-group" style={{ flex: 1, minWidth: "100px" }}>
-            <label className="field-label">Sex</label>
-            <select className="field-input" value={form.sex} onChange={(e) => setForm({ ...form, sex: e.target.value })}>
-              <option value="">—</option>
-              <option value="M">Male</option>
-              <option value="F">Female</option>
-              <option value="Other">Other</option>
-            </select>
-          </div>
-        </div>
-
-        <div className="field-group">
-          <label className="field-label">Address</label>
-          <input className="field-input" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
-        </div>
-
-        <div className="field-group">
-          <label className="field-label">Notes (administrative)</label>
-          <input className="field-input" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="e.g. wheelchair access, follow-up" />
-        </div>
-
-        <div className="field-group">
-          <label className="field-label">Doctor / Room *</label>
-          <select className="field-input" value={room} onChange={(e) => setRoom(e.target.value)}>
-            <option value="">— Select —</option>
-            {assignedRooms.map((r) => (
-              <option key={r} value={r}>{r} — {state.assigned[r]?.name} ({state.assigned[r]?.department})</option>
-            ))}
-          </select>
-          {assignedRooms.length === 0 && <div style={{ fontSize: "0.8rem", color: "var(--red)", marginTop: "0.4rem" }}>No doctors assigned to rooms yet. Ask Admin to assign one.</div>}
-        </div>
-
-        {msg && <div style={{ fontSize: "0.85rem", marginBottom: "0.75rem", color: msg.startsWith("✓") ? "var(--green)" : "var(--red)" }}>{msg}</div>}
-
-        <div style={{ display: "flex", gap: "0.5rem" }}>
-          <button className="btn btn-green" onClick={register} disabled={busy}>{busy ? "Registering…" : "Register & assign token"}</button>
-          {lastTicket && <button className="btn btn-blue" onClick={printTicket}>🖨 Print token {lastTicket.token}</button>}
-        </div>
-
-        {lastTicket && (
-          <div style={{ marginTop: "1rem", padding: "1rem", background: "var(--bg)", borderRadius: "10px", display: "flex", alignItems: "center", gap: "1.25rem" }}>
-            <div>
-              <div style={{ fontSize: "0.75rem", color: "var(--text-dim)", marginBottom: "0.25rem" }}>Patient tracking QR</div>
-              <LobbyQR url={`${APP_URL}/#track?token=${lastTicket.token}&room=${lastTicket.room}&doctor=${lastTicket.doctorId || ""}&date=${lastTicket.date}`} dark={false} />
-            </div>
-            <div>
-              <div style={{ fontWeight: 700, fontSize: "1.1rem" }}>Token {lastTicket.token}</div>
-              <div style={{ fontSize: "0.85rem", color: "var(--text-dim)" }}>{roomDisplay(lastTicket.room)} · {lastTicket.doctorName}</div>
-              <div style={{ fontSize: "0.8rem", color: "var(--text-dim)", marginTop: "0.25rem" }}>Patient can scan to track queue position</div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div className="card">
-        <h2 className="card-title">Today's Registrations ({todayVisits.length})</h2>
-        {todayVisits.length === 0 ? <div className="dim">No registrations yet today.</div> : (
-          <div className="table-wrap">
-            <table className="data-table">
-              <thead><tr><th>Token</th><th>Name</th><th>Room</th><th>Doctor</th><th>Status</th></tr></thead>
-              <tbody>
-                {todayVisits.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).map((v) => (
-                  <tr key={v.id}>
-                    <td style={{ fontWeight: 700 }}>{v.token}</td>
-                    <td>{v.name}</td>
-                    <td className="mono">{v.room}</td>
-                    <td>{v.doctorName || "—"}</td>
-                    <td><span className="status-pill" style={{ background: v.status === "served" ? "#64748b22" : "#16a34a22", color: v.status === "served" ? "#64748b" : "#16a34a" }}>{v.status}</span></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ─────────────────────────────────────────────
-   TOKEN TRACKER — personal queue position page
-   Public, no login needed. URL: /#track?token=15&room=R01&date=2026-06-10
-───────────────────────────────────────────── */
-function TokenTracker() {
-  const params = new URLSearchParams(window.location.hash.split("?")[1] || "");
-  const myToken = parseInt(params.get("token") || "0");
-  const roomParam = params.get("room") || "";
-  const doctorId = params.get("doctor") || "";
-  const date = params.get("date") || "";
-
-  const { state, ready } = useClinicState();
-  const [tick, setTick] = useState(0);
-  useEffect(() => { const t = setInterval(() => setTick((n) => n + 1), 1000); return () => clearInterval(t); }, []);
-
-  // Resolve room: use the param if set, otherwise look up the doctor's current room
-  const room = roomParam || (() => {
-    if (!doctorId) return "";
-    const entry = Object.entries(state.assigned || {}).find(([, a]) => a?.id === doctorId);
-    return entry ? entry[0] : "";
-  })();
-
-  if (!myToken || (!room && !doctorId)) {
-    return (
-      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#060810", color: "#fff", padding: "2rem", textAlign: "center" }}>
-        <div>
-          <div style={{ fontSize: "3rem", marginBottom: "1rem" }}>🏥</div>
-          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "1.2rem", fontWeight: 600 }}>{CLINIC_NAME}</div>
-          <div style={{ opacity: 0.5, marginTop: "0.5rem" }}>Invalid tracking link.</div>
-        </div>
-      </div>
-    );
-  }
-
-  if (!room) {
-    return (
-      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#060810", color: "#fff", padding: "2rem", textAlign: "center" }}>
-        <div>
-          <div style={{ fontSize: "3rem", marginBottom: "1rem" }}>🏥</div>
-          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "1.2rem", fontWeight: 600 }}>{CLINIC_NAME}</div>
-          <div style={{ fontSize: "2.5rem", fontWeight: 800, margin: "1rem 0", color: "#3b82f6" }}>Token {myToken}</div>
-          <div style={{ opacity: 0.6 }}>Your doctor hasn't been assigned a room yet.</div>
-          <div style={{ opacity: 0.4, fontSize: "0.85rem", marginTop: "0.5rem" }}>Please check back shortly, or ask Reception.</div>
-        </div>
-      </div>
-    );
-  }
-
-  const nowServing = state.customCall?.[room] ?? state.nowServing?.[room] ?? 0;
-  const status = state.status?.[room] || "IDLE";
-  const doctorName = state.assigned?.[room]?.name || "";
-  const sess = state.sessions?.[room];
-  const returnTime = sess?.returnTime || null;
-  const isPaused = status === "PAUSED";
-  const isServed = myToken <= nowServing;
-  const isCurrent = myToken === nowServing;
-  const ahead = Math.max(0, myToken - nowServing);
-  const avgWait = estimateWait(state, room);
-  const waitMin = avgWait && ahead > 0 ? ahead * avgWait : null;
-
-  // Status color for the card
-  const cardColor = isServed ? "#64748b" : isCurrent ? "#22c55e" : isPaused ? "#f97316" : "#3b82f6";
-
-  return (
-    <div style={{ minHeight: "100vh", background: "#060810", color: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "2rem", fontFamily: "'DM Sans', sans-serif" }}>
-      <div style={{ maxWidth: "340px", width: "100%", textAlign: "center" }}>
-        {/* Clinic name */}
-        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "1.1rem", fontWeight: 700, opacity: 0.6, marginBottom: "2rem" }}>{CLINIC_NAME}</div>
-
-        {/* Token card */}
-        <div style={{ background: "#0d1119", border: `2px solid ${cardColor}`, borderRadius: "20px", padding: "2rem", marginBottom: "1.5rem" }}>
-          <div style={{ fontSize: "0.65rem", letterSpacing: "0.12em", opacity: 0.4, fontWeight: 700, textTransform: "uppercase", marginBottom: "0.5rem" }}>Your Token</div>
-          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "5rem", fontWeight: 800, lineHeight: 1, color: cardColor }}>{myToken}</div>
-          <div style={{ marginTop: "0.75rem", fontSize: "0.9rem", opacity: 0.6 }}>{roomDisplay(room)}{doctorName ? ` · ${doctorName}` : ""}</div>
-        </div>
-
-        {/* Status */}
-        {isServed && !isCurrent && (
-          <div style={{ background: "#64748b22", border: "1px solid #64748b44", borderRadius: "12px", padding: "1.25rem", marginBottom: "1rem" }}>
-            <div style={{ fontSize: "1.5rem", marginBottom: "0.5rem" }}>✓</div>
-            <div style={{ fontWeight: 600 }}>Your turn has passed</div>
-            <div style={{ fontSize: "0.85rem", opacity: 0.6, marginTop: "0.25rem" }}>Please check with reception</div>
-          </div>
-        )}
-
-        {isCurrent && (
-          <div style={{ background: "#22c55e22", border: "1px solid #22c55e44", borderRadius: "12px", padding: "1.25rem", marginBottom: "1rem" }}>
-            <div style={{ fontSize: "1.5rem", marginBottom: "0.5rem" }}>🔔</div>
-            <div style={{ fontWeight: 700, fontSize: "1.1rem", color: "#22c55e" }}>It's your turn!</div>
-            <div style={{ fontSize: "0.85rem", opacity: 0.7, marginTop: "0.25rem" }}>Please proceed to {roomDisplay(room)}</div>
-          </div>
-        )}
-
-        {!isServed && !isCurrent && isPaused && (
-          <div style={{ background: "#f9731622", border: "1px solid #f9731644", borderRadius: "12px", padding: "1.25rem", marginBottom: "1rem" }}>
-            <div style={{ fontSize: "1.5rem", marginBottom: "0.5rem" }}>☕</div>
-            <div style={{ fontWeight: 600 }}>Doctor is on a break</div>
-            {returnTime && <div style={{ fontSize: "0.85rem", opacity: 0.7, marginTop: "0.25rem" }}>Expected back at {returnTime}</div>}
-          </div>
-        )}
-
-        {!isServed && !isCurrent && !isPaused && ready && (
-          <div style={{ background: "#3b82f622", border: "1px solid #3b82f644", borderRadius: "12px", padding: "1.25rem", marginBottom: "1rem" }}>
-            <div style={{ fontSize: "2rem", fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, color: "#3b82f6" }}>{ahead}</div>
-            <div style={{ fontSize: "0.85rem", opacity: 0.7 }}>{ahead === 1 ? "person" : "people"} ahead of you</div>
-            {waitMin && (
-              <div style={{ marginTop: "0.5rem", fontSize: "1.1rem", fontWeight: 600 }}>~{waitMin} min wait</div>
-            )}
-            {!waitMin && (
-              <div style={{ marginTop: "0.5rem", fontSize: "0.8rem", opacity: 0.5 }}>Estimating wait time…</div>
-            )}
-          </div>
-        )}
-
-        {/* Now serving */}
-        <div style={{ display: "flex", justifyContent: "space-between", padding: "0.75rem 1rem", background: "#ffffff08", borderRadius: "10px", fontSize: "0.85rem" }}>
-          <span style={{ opacity: 0.5 }}>Now serving</span>
-          <span style={{ fontWeight: 700 }}>{nowServing || "—"}</span>
-        </div>
-
-        <div style={{ marginTop: "1.5rem", fontSize: "0.72rem", opacity: 0.3 }}>Updates automatically · {date}</div>
-      </div>
-    </div>
-  );
-}
-
-/* ─────────────────────────────────────────────
-   ANALYTICS TAB
-───────────────────────────────────────────── */
 function AnalyticsTab() {
   const today = new Date().toISOString().slice(0, 10);
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
@@ -4071,104 +3685,6 @@ function AnalyticsTab() {
 /* ─────────────────────────────────────────────
    CRED CARD — extracted to prevent remount/focus loss
 ───────────────────────────────────────────── */
-function CredCard({ label, credKey, role, room, forms, setField, save, saving, msg }) {
-  const form = forms[credKey] || { username: "", password: "", confirm: "" };
-  const feedback = msg[credKey] || "";
-  const isSuccess = feedback.startsWith("✓");
-  return (
-    <div className="cred-card">
-      <div className="cred-room">{label}</div>
-      <div className="field-group">
-        <label className="field-label">Username</label>
-        <input className="field-input" value={form.username}
-          onChange={(e) => setField(credKey, "username", e.target.value)} />
-      </div>
-      <div className="field-group">
-        <label className="field-label">New password</label>
-        <input className="field-input" type="password" value={form.password}
-          onChange={(e) => setField(credKey, "password", e.target.value)}
-          autoComplete="new-password" />
-      </div>
-      <div className="field-group">
-        <label className="field-label">Confirm password</label>
-        <input className="field-input" type="password" value={form.confirm}
-          onChange={(e) => setField(credKey, "confirm", e.target.value)}
-          autoComplete="new-password" />
-      </div>
-      {feedback && <div style={{ fontSize: "0.8rem", marginBottom: "0.5rem", color: isSuccess ? "var(--green)" : "var(--red)" }}>{feedback}</div>}
-      <button className="btn btn-blue btn-sm" onClick={() => save(role, room)} disabled={saving === credKey}>
-        {saving === credKey ? "Saving…" : "Update credentials"}
-      </button>
-    </div>
-  );
-}
-
-function CredentialsTab({ rooms }) {
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(null);
-  const [msg, setMsg] = useState({});
-  const [forms, setForms] = useState({});
-
-  useEffect(() => {
-    fetchCredentials().then((c) => {
-      setLoading(false);
-      if (c) {
-        const init = {
-          admin: { username: c.admin?.username || "", password: "", confirm: "" },
-        };
-        rooms.forEach((r) => {
-          init[r] = { username: c.rooms?.[r]?.username || "", password: "", confirm: "" };
-        });
-        setForms(init);
-      }
-    }).catch(() => setLoading(false));
-  }, [rooms]);
-
-  const setField = (key, field, value) =>
-    setForms((f) => ({ ...f, [key]: { ...f[key], [field]: value } }));
-
-  const save = async (role, room = null) => {
-    const key = room || role.toLowerCase();
-    const form = forms[key] || {};
-    if (!form.username.trim()) { setMsg((m) => ({ ...m, [key]: "Username required." })); return; }
-    if (!form.password) { setMsg((m) => ({ ...m, [key]: "Password required." })); return; }
-    if (form.password !== form.confirm) { setMsg((m) => ({ ...m, [key]: "Passwords do not match." })); return; }
-    if (form.password.length < 6) { setMsg((m) => ({ ...m, [key]: "Password must be at least 6 characters." })); return; }
-    setSaving(key);
-    try {
-      await changePassword(role, form.username.trim(), form.password, room);
-      setMsg((m) => ({ ...m, [key]: "✓ Saved successfully." }));
-      setForms((f) => ({ ...f, [key]: { ...f[key], password: "", confirm: "" } }));
-    } catch (e) {
-      setMsg((m) => ({ ...m, [key]: "Error: " + e.message }));
-    } finally {
-      setSaving(null);
-    }
-  };
-
-  if (loading) return <div className="card dim">Loading credentials…</div>;
-
-  const shared = { forms, setField, save, saving, msg };
-
-  return (
-    <div className="card">
-      <h2 className="card-title">Change Credentials</h2>
-      <p className="dim" style={{ fontSize: "0.83rem", marginBottom: "1.25rem" }}>
-        Passwords are hashed with SHA-256 before storage. Minimum 6 characters.
-      </p>
-      <h3 style={{ fontWeight: 600, fontSize: "0.85rem", marginBottom: "0.75rem", color: "var(--text-dim)" }}>SYSTEM ACCOUNTS</h3>
-      <div className="cred-grid" style={{ marginBottom: "1.5rem" }}>
-        <CredCard label="Admin" credKey="admin" role="ADMIN" {...shared} />
-      </div>
-      <h3 style={{ fontWeight: 600, fontSize: "0.85rem", marginBottom: "0.75rem", color: "var(--text-dim)" }}>ROOM ACCOUNTS</h3>
-      <div className="cred-grid">
-        {rooms.map((r) => (
-          <CredCard key={r} label={r} credKey={r} role="DOCTOR" room={r} {...shared} />
-        ))}
-      </div>
-    </div>
-  );
-}
 
 /* ─────────────────────────────────────────────
    GLOBAL CSS
