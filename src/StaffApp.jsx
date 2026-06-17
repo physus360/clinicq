@@ -369,21 +369,76 @@ function estimateWait(state, roomId) {
 /* ═══════════════════════════════════════════
    APP ROOT
 ═══════════════════════════════════════════ */
-// Lobby entry point — public TV screen + patient token tracker
-// Staff portals live at /login (login.html → StaffApp)
-export default function LobbyApp() {
-  const [page, setPage] = useState(() => window.location.hash.replace("#", "").split("?")[0] || "lobby");
+export default function StaffApp() {
+  const { role, room, loading } = useAuth();
+  const [page, setPage] = useState(() => window.location.hash.replace("#", "").split("?")[0] || "login");
 
   useEffect(() => {
-    const onHash = () => setPage(window.location.hash.replace("#", "").split("?")[0] || "lobby");
+    const onHash = () => setPage(window.location.hash.replace("#", "").split("?")[0] || "login");
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
+  // Complete Google redirect sign-in
+  useEffect(() => {
+    completeGoogleRedirect().then((r) => {
+      if (r?.success) { /* auth state listener handles nav */ }
+    }).catch(() => {});
+  }, []);
+
+  // Unauthenticated → back to login
+  useEffect(() => {
+    if (loading) return;
+    const protected_ = ["doctor", "admin", "reception", "developer"];
+    if (protected_.includes(page) && !role) { navigate("login"); return; }
+    if (page === "doctor"    && role && role !== "DOCTOR")       { navigate("login"); }
+    if (page === "reception" && role && role !== "RECEPTIONIST") { navigate("login"); }
+    if (page === "admin"     && role && role !== "ADMIN")        { navigate("login"); }
+    if (page === "developer" && role && role !== "DEVELOPER")    { navigate("login"); }
+  }, [page, role, loading]);
+
+  // After login → route to correct portal
+  useEffect(() => {
+    if (loading || !role) return;
+    if (page === "login") {
+      navigate(
+        role === "DEVELOPER"    ? "developer" :
+        role === "ADMIN"        ? "admin" :
+        role === "RECEPTIONIST" ? "reception" : "doctor"
+      );
+    }
+  }, [role, loading]);
+
+  const navigate = (p) => {
+    window.location.hash = p;
+    setPage(p);
+  };
+
+  if (loading) return (
+    <>
+      <style>{GLOBAL_CSS}</style>
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#080b12" }}>
+        <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", color: "#fff", opacity: 0.5 }}>
+          <div className="spinner" />
+          <span style={{ fontFamily: "sans-serif" }}>Connecting…</span>
+        </div>
+      </div>
+    </>
+  );
+
+  const showNav = !["login"].includes(page);
+
   return (
     <>
       <style>{GLOBAL_CSS}</style>
-      {page === "track" ? <TokenTracker /> : <Lobby />}
+      {showNav && <TopNav navigate={navigate} role={role} room={room} />}
+      <div className={showNav ? "page-wrap" : ""}>
+        {page === "login"     && <LoginPage navigate={navigate} />}
+        {page === "doctor"    && role === "DOCTOR"       && <DoctorPortal room={room} />}
+        {page === "admin"     && role === "ADMIN"        && <AdminPortal />}
+        {page === "reception" && role === "RECEPTIONIST" && <ReceptionPortal />}
+        {page === "developer" && role === "DEVELOPER"    && <DeveloperPortal />}
+      </div>
     </>
   );
 }
@@ -395,12 +450,12 @@ function TopNav({ navigate, role, room }) {
   const logout = async () => {
     await logout_();
     // Hard redirect to lobby — clears all React state cleanly
-    window.location.href = window.location.pathname;
+    window.location.href = "/login";
   };
 
   return (
     <nav className="topnav">
-      <span className="topnav-brand" onClick={() => navigate("lobby")}>
+      <span className="topnav-brand">
         <span className="topnav-dot" />
         ClinicQ <span className="topnav-ver">v{APP_VERSION}</span>
       </span>
@@ -769,7 +824,7 @@ function LoginPage({ navigate }) {
 
 /* ─────────────────────────────────────────────
    ADMIN LOGIN — Developer + Admin (Google only)
-   URL: /#admin
+   URL: /login (same as staff)
 ───────────────────────────────────────────── */
 function AdminLoginPage() {
   const [err, setErr] = useState("");
@@ -2381,7 +2436,7 @@ function AdminEmailsTab({ state, setState }) {
     <div className="card">
       <h2 className="card-title">Admin Google Accounts</h2>
       <p className="dim" style={{ fontSize: "0.83rem", marginBottom: "1.25rem" }}>
-        Google accounts listed here get the <strong>Admin</strong> role when they sign in via <code>/#admin</code>. Your Developer email is separate and managed via <code>.env</code>.
+        Google accounts listed here get the <strong>Admin</strong> role when they sign in via <code>/login</code>. Your Developer email is separate and managed via <code>.env</code>.
       </p>
       <div className="add-row">
         <input className="field-input" placeholder="admin@example.com" value={newEmail}

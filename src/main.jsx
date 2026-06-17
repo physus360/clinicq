@@ -1,9 +1,4 @@
-import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import ClinicQ from "./App.jsx";
+import LobbyApp from "./App.jsx";
 
-createRoot(document.getElementById("root")).render(
-  <StrictMode>
-    <ClinicQ />
-  </StrictMode>
-);
+createRoot(document.getElementById("root")).render(<LobbyApp />);
