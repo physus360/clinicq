@@ -1626,13 +1626,9 @@ function StaffLoginsTab() {
     if (!person.email) { setMsg((m) => ({ ...m, [person.email]: "No email on file." })); return; }
     setBusy(person.email);
     try {
-      const { sendPasswordResetEmail } = await import("firebase/auth");
-      const { auth } = await import("./firebase.js");
-      await sendPasswordResetEmail(auth, person.email, {
-        url: `${APP_URL}/login`,
-        handleCodeInApp: false,
-      });
-      setMsg((m) => ({ ...m, [person.email]: "✓ Reset email sent to " + person.email }));
+      const sendWelcome = httpsCallable(functions, "sendStaffWelcomeEmail");
+      await sendWelcome({ email: person.email, name: person.name, loginUrl: `${APP_URL}/login` });
+      setMsg((m) => ({ ...m, [person.email]: "✓ Setup email sent to " + person.email }));
     } catch (e) {
       setMsg((m) => ({ ...m, [person.email]: "Failed: " + e.message }));
     } finally { setBusy(null); }
@@ -2199,20 +2195,16 @@ function StaffDirectoryTab({ state, setState }) {
     setRoleBusy(person.email); setMsg("");
     try {
       await grantRole(person, role, staff, setStaff, state, setState);
-      // Send the password-setup email via Firebase's built-in service
+      // Send branded welcome email via Resend
       try {
-        const { sendPasswordResetEmail } = await import("firebase/auth");
-        const { auth } = await import("./firebase.js");
-        await sendPasswordResetEmail(auth, person.email, {
-          url: `${APP_URL}/login`,
-          handleCodeInApp: false,
-        });
+        const sendWelcome = httpsCallable(functions, "sendStaffWelcomeEmail");
+        await sendWelcome({ email: person.email, name: person.name, role, loginUrl: `${APP_URL}/login` });
       } catch (mailErr) {
-        setMsg(`✓ ${person.name} is now ${role}, but the setup email failed: ${mailErr.message}. They can use "Forgot password" on the login page.`);
+        setMsg(`✓ ${person.name} is now ${role}, but the welcome email failed: ${mailErr.message}. Use "Send setup email" in Staff Logins tab.`);
         setRoleBusy(null);
         return;
       }
-      setMsg(`✓ ${person.name} is now ${role}. A password-setup email was sent to ${person.email}.`);
+      setMsg(`✓ ${person.name} is now ${role}. A welcome email was sent to ${person.email}.`);
     } catch (e) {
       setMsg(`✕ Could not assign role: ${e.message}`);
     } finally { setRoleBusy(null); }
