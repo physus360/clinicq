@@ -35,7 +35,7 @@ import {
 import { db, storage, APP_URL, functions } from "./firebase.js";
 import { httpsCallable } from "firebase/functions";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
-import { initCredentials, verifyLogin, addRoomCredential, removeRoomCredential, onAuthChange, logout as logout_, signInWithGoogle, completeGoogleRedirect } from "./auth.js";
+import { onAuthChange, logout as logout_, signInWithGoogle, completeGoogleRedirect } from "./auth.js";
 
 const CONFIG_DOC = doc(db, "clinicq", "config");
 const ROOMS_COL = collection(db, "clinicq_rooms");
@@ -499,13 +499,12 @@ function LobbyQR({ url, dark = true }) {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const size = 80;
-    import("https://esm.sh/qrcode@1.5.3").then((QRCode) => {
+    import("qrcode").then((QRCode) => {
       QRCode.toCanvas(canvas, url, {
-        width: size, margin: 1,
+        width: 80, margin: 1,
         color: dark
-          ? { dark: "#ffffff", light: "#00000000" }  // white on transparent (for dark lobby)
-          : { dark: "#000000", light: "#ffffff" },     // black on white (for light portals)
+          ? { dark: "#ffffff", light: "#00000000" }
+          : { dark: "#000000", light: "#ffffff" },
       });
     }).catch(() => {});
   }, [url, dark]);
@@ -837,6 +836,12 @@ function DoctorPortal({ room: roomProp }) {
   // ALL hooks must be declared before any early returns
   const [patients, setPatients] = useState([]);
   const [docTheme, setDocTheme] = useState(() => localStorage.getItem("cq_doctor_theme") || "light");
+  const [breakInput, setBreakInput] = useState("");
+  const [showBreakInput, setShowBreakInput] = useState(false);
+  const [customCallInput, setCustomCallInput] = useState("");
+  const [showCustomCall, setShowCustomCall] = useState(false);
+  const [manualTokenInput, setManualTokenInput] = useState("");
+  const [showManualToken, setShowManualToken] = useState(false);
   const play = useChime(state.chime);
   const today = new Date().toISOString().slice(0, 10);
 
@@ -1135,50 +1140,60 @@ function DoctorPortal({ room: roomProp }) {
     }, "previous", "CALL");
   };
 
-  const pauseResume = () => {
-    const next = status === "PAUSED" ? "CALLING" : "PAUSED";
+  const confirmPause = () => {
     let returnTime = null;
-    if (next === "PAUSED") {
-      const choice = window.prompt("Break duration (optional):\nEnter minutes (e.g. 15, 30, 60) or a time (e.g. 14:30), or leave blank:");
-      if (choice) {
-        const mins = parseInt(choice);
-        if (!isNaN(mins) && mins > 0) {
-          const ret = new Date(Date.now() + mins * 60000);
-          returnTime = ret.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-        } else if (choice.includes(":")) {
-          returnTime = choice.trim();
-        }
+    if (breakInput.trim()) {
+      const mins = parseInt(breakInput);
+      if (!isNaN(mins) && mins > 0) {
+        const ret = new Date(Date.now() + mins * 60000);
+        returnTime = ret.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      } else if (breakInput.includes(":")) {
+        returnTime = breakInput.trim();
       }
     }
-    const patch = { status: next };
-    if (next === "PAUSED" && returnTime) {
-      patch.sessions = { ...(session || {}), returnTime };
-    } else if (next === "CALLING" && session?.returnTime) {
-      patch.sessions = { ...session, returnTime: null };
+    const patch = { status: "PAUSED" };
+    if (returnTime) patch.sessions = { ...(session || {}), returnTime };
+    act(patch, "pause", "CALL");
+    setShowBreakInput(false); setBreakInput("");
+  };
+
+  const pauseResume = () => {
+    if (status === "PAUSED") {
+      const patch = { status: "CALLING" };
+      if (session?.returnTime) patch.sessions = { ...session, returnTime: null };
+      act(patch, "resume", "CALL");
+      setShowBreakInput(false); setBreakInput("");
+    } else {
+      setShowBreakInput(true);
+      setShowCustomCall(false); setShowManualToken(false);
     }
-    act(patch, next === "PAUSED" ? "pause" : "resume", "CALL");
   };
 
   const recall = () => {
     act({ status: "RECALL" }, "recall", "RECALL");
   };
 
+  const confirmCustomCall = () => {
+    if (!customCallInput.trim()) return;
+    act({ customCall: customCallInput.trim(), status: "CALLING" }, "customCall", "CALL");
+    setShowCustomCall(false); setCustomCallInput("");
+  };
+
   const customCall = () => {
-    const value = prompt("Enter custom token to call:");
-    if (!value) return;
-    act({ customCall: value, status: "CALLING" }, "customCall", "CALL");
+    setShowCustomCall((v) => !v);
+    setShowBreakInput(false); setShowManualToken(false);
+  };
+
+  const confirmManualToken = () => {
+    const n = parseInt(manualTokenInput, 10);
+    if (isNaN(n) || n < 1) return;
+    act({ nowServing: n, upNext: n + 1, customCall: null, status: "CALLING" }, "manualToken", "CALL");
+    setShowManualToken(false); setManualTokenInput("");
   };
 
   const manualToken = () => {
-    const val = prompt("Set Now Serving to:");
-    const n = parseInt(val, 10);
-    if (isNaN(n) || n < 1) return;
-    act({
-      nowServing: n,
-      upNext: n + 1,
-      customCall: null,
-      status: "CALLING",
-    }, "manualToken", "CALL");
+    setShowManualToken((v) => !v);
+    setShowBreakInput(false); setShowCustomCall(false);
   };
 
   const sessionDur = session?.startedAt
@@ -1259,9 +1274,51 @@ function DoctorPortal({ room: roomProp }) {
             <button className="btn btn-outline" onClick={pauseResume}>
               {status === "PAUSED" ? "▶ Resume" : "⏸ Pause"}
             </button>
-            <button className="btn btn-outline" onClick={customCall}>✎ Custom Call</button>
-            <button className="btn btn-outline" onClick={manualToken}>⌨ Set Token</button>
+            <button className={`btn btn-outline${showCustomCall ? " active" : ""}`} onClick={customCall}>✎ Custom Call</button>
+            <button className={`btn btn-outline${showManualToken ? " active" : ""}`} onClick={manualToken}>⌨ Set Token</button>
           </div>
+
+          {/* Inline: Break duration input */}
+          {showBreakInput && (
+            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginTop: "0.5rem", padding: "0.75rem", background: "var(--bg)", borderRadius: "8px", border: "1px solid var(--border)" }}>
+              <div style={{ fontSize: "0.82rem", color: "var(--text-dim)", whiteSpace: "nowrap" }}>Break duration:</div>
+              <input className="field-input" style={{ flex: 1, padding: "0.35rem 0.6rem", fontSize: "0.85rem" }}
+                placeholder="mins (e.g. 15) or time (e.g. 14:30) — leave blank for indefinite"
+                value={breakInput} onChange={(e) => setBreakInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && confirmPause()}
+                autoFocus />
+              <button className="btn btn-yellow btn-sm" onClick={confirmPause}>⏸ Pause</button>
+              <button className="btn btn-outline btn-sm" onClick={() => { setShowBreakInput(false); setBreakInput(""); }}>Cancel</button>
+            </div>
+          )}
+
+          {/* Inline: Custom call input */}
+          {showCustomCall && (
+            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginTop: "0.5rem", padding: "0.75rem", background: "var(--bg)", borderRadius: "8px", border: "1px solid var(--border)" }}>
+              <div style={{ fontSize: "0.82rem", color: "var(--text-dim)", whiteSpace: "nowrap" }}>Call token:</div>
+              <input className="field-input" style={{ flex: 1, padding: "0.35rem 0.6rem", fontSize: "0.85rem" }}
+                placeholder="Token number or label"
+                value={customCallInput} onChange={(e) => setCustomCallInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && confirmCustomCall()}
+                autoFocus />
+              <button className="btn btn-blue btn-sm" onClick={confirmCustomCall}>Call</button>
+              <button className="btn btn-outline btn-sm" onClick={() => { setShowCustomCall(false); setCustomCallInput(""); }}>Cancel</button>
+            </div>
+          )}
+
+          {/* Inline: Set token input */}
+          {showManualToken && (
+            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginTop: "0.5rem", padding: "0.75rem", background: "var(--bg)", borderRadius: "8px", border: "1px solid var(--border)" }}>
+              <div style={{ fontSize: "0.82rem", color: "var(--text-dim)", whiteSpace: "nowrap" }}>Set now serving to:</div>
+              <input className="field-input" style={{ width: "80px", padding: "0.35rem 0.6rem", fontSize: "0.85rem" }}
+                type="number" min="1" placeholder="No."
+                value={manualTokenInput} onChange={(e) => setManualTokenInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && confirmManualToken()}
+                autoFocus />
+              <button className="btn btn-blue btn-sm" onClick={confirmManualToken}>Set</button>
+              <button className="btn btn-outline btn-sm" onClick={() => { setShowManualToken(false); setManualTokenInput(""); }}>Cancel</button>
+            </div>
+          )}
         </div>
 
         {/* Today's patient list */}
@@ -1396,8 +1453,8 @@ function AdminPortal() {
   const [newRoom, setNewRoom] = useState("");
   const [auditLog, setAuditLog] = useState([]);
   const [auditLoading, setAuditLoading] = useState(false);
-  const TABS = ["rooms", "stafflogins", "analytics", "audit", "settings"];
-  const TAB_LABELS = { rooms: "🏥 Rooms", stafflogins: "👥 Staff Logins", analytics: "📊 Analytics", audit: "📋 Audit", settings: "⚙️ Settings" };
+  const TABS = ["rooms", "staff", "stafflogins", "analytics", "audit", "settings"];
+  const TAB_LABELS = { rooms: "🏥 Rooms", staff: "👥 Staff Directory", stafflogins: "📧 Login Emails", analytics: "📊 Analytics", audit: "📋 Audit", settings: "⚙️ Settings" };
 
   const activeDoctors = Object.values(state.doctorDirectory || {}).filter((d) => d.active);
 
@@ -1421,7 +1478,6 @@ function AdminPortal() {
     if (!id || (state.rooms || []).includes(id)) return;
     const rooms = [...(state.rooms || DEFAULT_ROOMS), id];
     await setState({ ...state, rooms }, { role: "ADMIN", action: "addRoom", id });
-    await addRoomCredential(id);
     setNewRoom("");
   };
 
@@ -1430,7 +1486,6 @@ function AdminPortal() {
     const rooms = (state.rooms || []).filter((r) => r !== id);
     await setState({ ...state, rooms }, { role: "ADMIN", action: "removeRoom", id });
     await deleteRoomDoc(id);
-    await removeRoomCredential(id);
   };
 
   const loadAudit = async () => {
@@ -1512,6 +1567,7 @@ function AdminPortal() {
           </div>
         )}
 
+        {tab === "staff" && <StaffDirectoryTab state={state} setState={setState} />}
         {tab === "stafflogins" && <StaffLoginsTab />}
         {tab === "analytics" && <AnalyticsTab />}
         {tab === "settings" && <AdminSettingsTab state={state} setState={setState} />}
@@ -1715,7 +1771,6 @@ function DeveloperPortal() {
     if (!id || (state.rooms || []).includes(id)) return;
     const rooms = [...(state.rooms || DEFAULT_ROOMS), id];
     await setState({ ...state, rooms }, { role: "DEVELOPER", action: "addRoom", id });
-    await addRoomCredential(id);
     setNewRoom("");
   };
 
@@ -1724,7 +1779,6 @@ function DeveloperPortal() {
     const rooms = (state.rooms || []).filter((r) => r !== id);
     await setState({ ...state, rooms }, { role: "DEVELOPER", action: "removeRoom", id });
     await deleteRoomDoc(id);
-    await removeRoomCredential(id);
   };
 
   const updateChime = async (patch) => {
@@ -3277,7 +3331,7 @@ function computeAge(dob) {
 // Generate QR code as a base64 data URL — no CDN needed in print window
 async function generateQRDataURL(url) {
   try {
-    const QRCode = await import("https://esm.sh/qrcode@1.5.3");
+    const QRCode = await import("qrcode");
     return await QRCode.toDataURL(url, {
       width: 160, margin: 2,
       color: { dark: "#000000", light: "#ffffff" },

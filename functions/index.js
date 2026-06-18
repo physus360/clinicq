@@ -2,7 +2,8 @@
  * ClinicQ Cloud Functions — staff account management
  *
  * All callable functions verify the caller is the Developer
- * (matching DEVELOPER_EMAIL) before doing anything.
+ * (matching DEVELOPER_EMAIL) OR a whitelisted Admin email
+ * before doing anything.
  *
  * Roles are stored as Firebase Auth custom claims: { role, room? }
  * so Firestore security rules can check request.auth.token.role.
@@ -18,20 +19,27 @@ setGlobalOptions({ region: "us-central1", maxInstances: 5 });
 
 // Developer email comes from functions/.env at deploy time.
 // "public" invoker lets the callable request reach the code;
-// assertDeveloper() below still enforces who can actually act.
+// assertDeveloperOrAdmin() below still enforces who can actually act.
 const DEVELOPER_EMAIL = process.env.DEVELOPER_EMAIL || "";
 
 const VALID_ROLES = ["DOCTOR", "RECEPTIONIST", "ADMIN"];
 
-// Guard: only the developer may call these functions
-function assertDeveloper(request) {
+// Guard: Developer OR whitelisted Admin may call these functions
+async function assertDeveloperOrAdmin(request) {
   const email = request.auth?.token?.email;
   if (!request.auth || !email) {
     throw new HttpsError("unauthenticated", "You must be signed in.");
   }
-  if (!DEVELOPER_EMAIL || email !== DEVELOPER_EMAIL) {
-    throw new HttpsError("permission-denied", "Only the developer can manage staff accounts.");
-  }
+  // Developer always allowed
+  if (DEVELOPER_EMAIL && email === DEVELOPER_EMAIL) return;
+  // Check Firestore Admin whitelist
+  try {
+    const snap = await admin.firestore().doc("clinicq/config").get();
+    const adminEmails = (snap.exists ? snap.data()?.adminEmails || [] : [])
+      .map((e) => e.toLowerCase());
+    if (adminEmails.includes(email.toLowerCase())) return;
+  } catch {}
+  throw new HttpsError("permission-denied", "Only the Developer or an Admin can manage staff accounts.");
 }
 
 /**
@@ -40,7 +48,7 @@ function assertDeveloper(request) {
  * data: { email, name, role }
  */
 exports.createStaffAccount = onCall({ invoker: "public" }, async (request) => {
-  assertDeveloper(request);
+  await assertDeveloperOrAdmin(request);
   const { email, name, role } = request.data || {};
 
   if (!email || !role) throw new HttpsError("invalid-argument", "Email and role are required.");
@@ -84,7 +92,7 @@ exports.createStaffAccount = onCall({ invoker: "public" }, async (request) => {
  * data: { email, role }
  */
 exports.setStaffRole = onCall({ invoker: "public" }, async (request) => {
-  assertDeveloper(request);
+  await assertDeveloperOrAdmin(request);
   const { email, role } = request.data || {};
   if (!email || !role) throw new HttpsError("invalid-argument", "Email and role are required.");
   if (!VALID_ROLES.includes(role)) throw new HttpsError("invalid-argument", "Invalid role.");
@@ -104,7 +112,7 @@ exports.setStaffRole = onCall({ invoker: "public" }, async (request) => {
  * data: { email }
  */
 exports.revokeStaffAccount = onCall({ invoker: "public" }, async (request) => {
-  assertDeveloper(request);
+  await assertDeveloperOrAdmin(request);
   const { email } = request.data || {};
   if (!email) throw new HttpsError("invalid-argument", "Email is required.");
 
@@ -124,7 +132,7 @@ exports.revokeStaffAccount = onCall({ invoker: "public" }, async (request) => {
  * data: { email, role }
  */
 exports.reactivateStaffAccount = onCall({ invoker: "public" }, async (request) => {
-  assertDeveloper(request);
+  await assertDeveloperOrAdmin(request);
   const { email, role } = request.data || {};
   if (!email) throw new HttpsError("invalid-argument", "Email is required.");
 

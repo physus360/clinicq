@@ -35,7 +35,7 @@ import {
 import { db, storage, APP_URL, functions } from "./firebase.js";
 import { httpsCallable } from "firebase/functions";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
-import { initCredentials, verifyLogin, changePassword, addRoomCredential, removeRoomCredential, fetchCredentials, onAuthChange, logout as logout_, signInWithGoogle, completeGoogleRedirect } from "./auth.js";
+import { onAuthChange, logout as logout_, signInWithGoogle, completeGoogleRedirect } from "./auth.js";
 
 const CONFIG_DOC = doc(db, "clinicq", "config");
 const ROOMS_COL = collection(db, "clinicq_rooms");
@@ -444,13 +444,12 @@ function LobbyQR({ url, dark = true }) {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const size = 80;
-    import("https://esm.sh/qrcode@1.5.3").then((QRCode) => {
+    import("qrcode").then((QRCode) => {
       QRCode.toCanvas(canvas, url, {
-        width: size, margin: 1,
+        width: 80, margin: 1,
         color: dark
-          ? { dark: "#ffffff", light: "#00000000" }  // white on transparent (for dark lobby)
-          : { dark: "#000000", light: "#ffffff" },     // black on white (for light portals)
+          ? { dark: "#ffffff", light: "#00000000" }
+          : { dark: "#000000", light: "#ffffff" },
       });
     }).catch(() => {});
   }, [url, dark]);
@@ -3238,7 +3237,7 @@ function computeAge(dob) {
 // Generate QR code as a base64 data URL — no CDN needed in print window
 async function generateQRDataURL(url) {
   try {
-    const QRCode = await import("https://esm.sh/qrcode@1.5.3");
+    const QRCode = await import("qrcode");
     return await QRCode.toDataURL(url, {
       width: 160, margin: 2,
       color: { dark: "#000000", light: "#ffffff" },

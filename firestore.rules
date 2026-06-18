@@ -1,0 +1,97 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helper functions ─────────────────────────────────────────
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function role() {
+      return request.auth.token.role;
+    }
+
+    function isDeveloper() {
+      return isSignedIn() && request.auth.token.email == "physus2020@gmail.com";
+    }
+
+    function isAdmin() {
+      return isSignedIn() && role() == "ADMIN";
+    }
+
+    function isReception() {
+      return isSignedIn() && role() == "RECEPTIONIST";
+    }
+
+    function isDoctor() {
+      return isSignedIn() && role() == "DOCTOR";
+    }
+
+    function isStaff() {
+      return isSignedIn() && role() in ["DOCTOR", "RECEPTIONIST", "ADMIN"];
+    }
+
+    function isDeveloperOrAdmin() {
+      return isDeveloper() || isAdmin();
+    }
+
+    // ── Clinic config (rooms, doctorDirectory, chime, schedule, etc.) ──
+    // Public read — lobby TV needs room state without auth
+    // Write — Developer or Admin only
+    match /clinicq/config {
+      allow read: if true;
+      allow write: if isDeveloperOrAdmin();
+    }
+
+    // ── Staff directory ──────────────────────────────────────────
+    // Read — Developer or Admin only
+    // Write — Developer or Admin only
+    match /clinicq/staff {
+      allow read: if isDeveloperOrAdmin();
+      allow write: if isDeveloperOrAdmin();
+    }
+
+    // ── Room state ───────────────────────────────────────────────
+    // Public read — lobby TV + patient token tracker need this
+    // Write — any signed-in staff (doctors update nowServing, reception assigns rooms)
+    match /clinicq_rooms/{roomId} {
+      allow read: if true;
+      allow write: if isStaff() || isDeveloperOrAdmin();
+    }
+
+    // ── Patient records ──────────────────────────────────────────
+    // Read/Write — staff only (reception + doctors)
+    match /clinicq_patients/{patientId} {
+      allow read: if isStaff() || isDeveloperOrAdmin();
+      allow write: if isStaff() || isDeveloperOrAdmin();
+    }
+
+    // ── Visits (appointments) ────────────────────────────────────
+    // Read/Write — staff only
+    match /clinicq_visits/{visitId} {
+      allow read: if isStaff() || isDeveloperOrAdmin();
+      allow write: if isStaff() || isDeveloperOrAdmin();
+    }
+
+    // ── Session history ──────────────────────────────────────────
+    // Read — Developer or Admin (analytics)
+    // Write — Doctors (end session writes here)
+    match /clinicq_sessions/{sessionId} {
+      allow read: if isDeveloperOrAdmin();
+      allow write: if isDoctor() || isDeveloperOrAdmin();
+    }
+
+    // ── Audit log ────────────────────────────────────────────────
+    // Read — Developer or Admin only
+    // Write — any staff (all actions are audited)
+    match /clinicq_audit/{auditId} {
+      allow read: if isDeveloperOrAdmin();
+      allow write: if isStaff() || isDeveloperOrAdmin();
+    }
+
+    // ── Deny everything else ─────────────────────────────────────
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
