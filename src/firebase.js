@@ -1,6 +1,6 @@
 import { initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
-import { getAuth, GoogleAuthProvider } from "firebase/auth";
+import { getAuth, GoogleAuthProvider, browserSessionPersistence, setPersistence } from "firebase/auth";
 import { getStorage } from "firebase/storage";
 import { getFunctions } from "firebase/functions";
 
@@ -21,3 +21,7 @@ export const functions = getFunctions(firebaseApp, "us-central1");
 export const googleProvider = new GoogleAuthProvider();
 export const DEVELOPER_EMAIL = import.meta.env.VITE_DEVELOPER_EMAIL || "";
 export const APP_URL = import.meta.env.VITE_APP_URL || window.location.origin;
+
+// Session-only persistence — auth token clears when browser/tab is closed
+// Prevents previous user's session from persisting on shared computers
+setPersistence(auth, browserSessionPersistence).catch(() => {});
