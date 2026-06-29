@@ -739,6 +739,10 @@ function LoginPage({ navigate }) {
   const [pass, setPass] = useState("");
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
+  const [showForgot, setShowForgot] = useState(false);
+  const [resetEmail, setResetEmail] = useState("");
+  const [resetMsg, setResetMsg] = useState("");
+  const [resetLoading, setResetLoading] = useState(false);
 
   const submit = async () => {
     if (loading) return;
@@ -749,7 +753,6 @@ function LoginPage({ navigate }) {
       const { signInWithEmailAndPassword } = await import("firebase/auth");
       const { auth } = await import("./firebase.js");
       await signInWithEmailAndPassword(auth, email.trim(), pass);
-      // Auth state change triggers redirect via useEffect in App root
     } catch (e) {
       const code = e.code || "";
       if (code.includes("user-not-found") || code.includes("wrong-password") || code.includes("invalid-credential")) {
@@ -759,10 +762,68 @@ function LoginPage({ navigate }) {
       } else {
         setErr(e.message || "Login failed.");
       }
-    } finally {
-      setLoading(false);
-    }
+    } finally { setLoading(false); }
   };
+
+  const sendReset = async () => {
+    if (!resetEmail.trim()) { setResetMsg("Please enter your email address."); return; }
+    setResetLoading(true); setResetMsg("");
+    try {
+      const { sendPasswordResetEmail } = await import("firebase/auth");
+      const { auth } = await import("./firebase.js");
+      await sendPasswordResetEmail(auth, resetEmail.trim(), {
+        url: `${APP_URL}/login`,
+        handleCodeInApp: false,
+      });
+      setResetMsg("Password reset email sent. Please check your inbox and spam folder.");
+    } catch (e) {
+      const code = e.code || "";
+      if (code.includes("user-not-found")) {
+        setResetMsg("No account found with that email. Please contact your administrator.");
+      } else {
+        setResetMsg("Failed to send reset email: " + e.message);
+      }
+    } finally { setResetLoading(false); }
+  };
+
+  if (showForgot) {
+    return (
+      <div className="portal-bg">
+        <div className="login-card">
+          <div className="login-logo">
+            <span className="lobby-pulse" style={{ width: 10, height: 10 }} />
+            {CLINIC_NAME}
+          </div>
+          <h2 className="login-title">Reset Password</h2>
+          <p className="dim" style={{ fontSize: "0.85rem", marginBottom: "1rem" }}>
+            Enter your work email address and we'll send you a link to set a new password.
+          </p>
+          <div className="field-group">
+            <label className="field-label">Email</label>
+            <input className="field-input" type="email" value={resetEmail}
+              onChange={(e) => setResetEmail(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && sendReset()}
+              placeholder="your@email.com" autoFocus />
+          </div>
+          {resetMsg && (
+            <div style={{ fontSize: "0.82rem", padding: "0.6rem", borderRadius: "6px",
+              background: resetMsg.includes("sent") ? "var(--green-bg, #f0fdf4)" : "var(--red-bg, #fef2f2)",
+              color: resetMsg.includes("sent") ? "var(--green)" : "var(--red)",
+              marginBottom: "0.75rem" }}>
+              {resetMsg}
+            </div>
+          )}
+          <button className="btn btn-primary w-full" onClick={sendReset} disabled={resetLoading}>
+            {resetLoading ? "Sending..." : "Send Reset Email"}
+          </button>
+          <button className="btn btn-outline w-full" style={{ marginTop: "0.5rem" }}
+            onClick={() => { setShowForgot(false); setResetEmail(""); setResetMsg(""); }}>
+            Back to Sign in
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="portal-bg">
@@ -791,8 +852,15 @@ function LoginPage({ navigate }) {
         {err && <div className="login-err">{err}</div>}
 
         <button className="btn btn-primary w-full" onClick={submit} disabled={loading}>
-          {loading ? "Signing in…" : "Sign in"}
+          {loading ? "Signing in..." : "Sign in"}
         </button>
+
+        <div style={{ textAlign: "right", marginTop: "0.4rem" }}>
+          <span style={{ fontSize: "0.78rem", color: "var(--blue)", cursor: "pointer", textDecoration: "underline" }}
+            onClick={() => { setShowForgot(true); setResetEmail(email); }}>
+            Forgot password?
+          </span>
+        </div>
 
         <div className="login-divider"><span>or</span></div>
 
@@ -811,11 +879,8 @@ function LoginPage({ navigate }) {
             <path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/>
             <path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/>
           </svg>
-          {loading ? "Signing in…" : "Sign in with Google"}
+          {loading ? "Signing in..." : "Sign in with Google"}
         </button>
-        <div className="dim" style={{ fontSize: "0.75rem", textAlign: "center", marginTop: "0.5rem" }}>
-          Forgot your password? Ask Admin to send a reset email.
-        </div>
       </div>
     </div>
   );
@@ -984,18 +1049,15 @@ function DoctorPortal({ room: roomProp }) {
               </>
             ) : (
               <>
+                <div style={{ fontSize: "3rem", marginBottom: "0.75rem" }}>⚕️</div>
                 <div style={{ fontWeight: 600, fontSize: "1.1rem", marginBottom: "0.5rem" }}>
-                  Account not linked
+                  Account not set up yet
                 </div>
                 <div className="dim" style={{ fontSize: "0.85rem", marginBottom: "1.5rem" }}>
-                  Your account isn't linked to the doctor directory yet. Ask the Developer to rebuild the doctor directory from the Staff tab.
+                  Your account hasn't been configured yet. Please contact your clinic administrator to get access.
                 </div>
-                <div style={{ background: "var(--bg)", borderRadius: "8px", padding: "0.75rem", fontSize: "0.75rem", textAlign: "left", maxWidth: "320px", margin: "0 auto" }}>
-                  <div className="dim" style={{ marginBottom: "0.3rem" }}>Debug info for Developer:</div>
-                  <div className="mono" style={{ fontSize: "0.7rem" }}>Email: {user?.email || "(blank)"}</div>
-                  <div className="mono" style={{ fontSize: "0.7rem" }}>UID: {user?.uid?.slice(0, 16)}…</div>
-                  <div className="mono" style={{ fontSize: "0.7rem" }}>In directory: {matchedByEmail ? "Yes — " + matchedByEmail.name : "No"}</div>
-                  <div className="mono" style={{ fontSize: "0.7rem" }}>Assigned rooms: {Object.entries(state.assigned || {}).filter(([,a]) => a).map(([r,a]) => `${r}:${a?.name}`).join(", ") || "none"}</div>
+                <div className="dim" style={{ fontSize: "0.78rem" }}>
+                  {user?.email || ""}
                 </div>
               </>
             )}
@@ -2185,6 +2247,19 @@ function StaffDirectoryTab({ state, setState }) {
       merged = staff.map((s) => (personKey(s) === origKey ? cleaned : s));
     }
     await setDoc(STAFF_DOC, { people: merged });
+    // Auto-sync doctor directory on every save
+    const newDir = {};
+    merged.filter(p => p.category === "doctor" && p.active !== false).forEach(p => {
+      const key = p.email || p.name;
+      newDir[key] = {
+        id: p.id || key,
+        name: p.name,
+        email: p.email || "",
+        designation: p.designation || "",
+        consultationTier: p.consultationTier || "",
+      };
+    });
+    await setDoc(CONFIG_DOC, { doctorDirectory: newDir }, { merge: true });
     setStaff(merged);
     setMsg(`✓ ${isNew ? "Added" : "Updated"} ${cleaned.name}.`);
     closeForm();
