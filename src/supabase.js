@@ -54,7 +54,8 @@ export async function upsertPatient(patient) {
       dob:               patient.dob || null,
       sex:               patient.sex || null,
       mobile:            patient.mobile || null,
-      category:          patient.category || "General",
+      category:          patient.category || null,
+      rank:              patient.rank || null,
       police_service_no: patient.policeServiceNo || null,
       address:           patient.address || null,
       notes:             patient.notes || null,
@@ -68,12 +69,11 @@ export async function upsertPatient(patient) {
 
 // ── Service helpers ─────────────────────────────────────────
 export async function searchServices(query, type = null, limit = 50) {
-  const trimmed = query.trim();
   let q = supabase
     .from("services")
     .select("*")
     .eq("active", true)
-    .or(`name.ilike.%${trimmed}%,code.ilike.%${trimmed}%`)
+    .ilike("name", `%${query}%`)
     .limit(limit);
   if (type) q = q.eq("type", type);
   const { data, error } = await q;

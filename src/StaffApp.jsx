@@ -1402,7 +1402,7 @@ function DoctorPortal({ room: roomProp }) {
                   </div>
                   {current && (
                     <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap", marginTop: "0.4rem" }}>
-                      {current.patientCategory && current.patientCategory !== "General" && (
+                      {current.patientCategory && (
                         <span className="status-pill" style={{ background: "#a855f722", color: "#a855f7", fontSize: "0.7rem" }}>
                           {current.patientCategory}
                         </span>
@@ -1458,7 +1458,7 @@ function DoctorPortal({ room: roomProp }) {
                         </td>
                         <td>
                           <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
-                            {p.patientCategory && p.patientCategory !== "General" && (
+                            {p.patientCategory && (
                               <span className="status-pill" style={{ background: "#a855f722", color: "#a855f7", fontSize: "0.68rem" }}>
                                 {p.patientCategory}
                               </span>
@@ -2826,7 +2826,7 @@ function PatientRecordsTab() {
   const [idInput, setIdInput] = useState("");
   const [phase, setPhase] = useState("search"); // search | found | notfound | editing
   const [patient, setPatient] = useState(null);
-  const [form, setForm] = useState({ idNumber: "", name: "", mobile: "", dob: "", sex: "", category: "General", policeServiceNo: "", address: "", notes: "" });
+  const [form, setForm] = useState({ idNumber: "", name: "", mobile: "", dob: "", sex: "", category: "", rank: "", policeServiceNo: "", address: "", notes: "" });
   const [msg, setMsg] = useState("");
   const [searching, setSearching] = useState(false);
 
@@ -2839,7 +2839,7 @@ function PatientRecordsTab() {
       if (snap.exists()) {
         const p = { id: snap.id, ...snap.data() };
         setPatient(p);
-        setForm({ idNumber: p.idNumber || id, name: p.name || "", mobile: p.mobile || "", dob: p.dob || "", sex: p.sex || "", category: p.category || "General", policeServiceNo: p.policeServiceNo || "", address: p.address || "", notes: p.notes || "" });
+        setForm({ idNumber: p.idNumber || id, name: p.name || "", mobile: p.mobile || "", dob: p.dob || "", sex: p.sex || "", category: p.category || "", rank: p.rank || "", policeServiceNo: p.policeServiceNo || "", address: p.address || "", notes: p.notes || "" });
         setPhase("found");
       } else {
         setForm({ idNumber: id, name: "", mobile: "", dob: "", sex: "", address: "", notes: "" });
@@ -2956,17 +2956,21 @@ function PatientFormFields({ form, setForm, lockId }) {
         </div>
       </div>
       <div className="field-group">
-        <label className="field-label">Patient Category</label>
-        <select className="field-input" value={form.category || "General"} onChange={(e) => setForm({ ...form, category: e.target.value })}>
-          <option value="General">General</option>
-          <option value="Police">Police</option>
-          <option value="Police EXO">Police EXO</option>
-          <option value="Police Family">Police Family</option>
-          <option value="Emergency">Emergency</option>
-          <option value="Police Custody">Police Custody</option>
+        <label className="field-label">Patient Account <span style={{ color: "var(--red)" }}>*</span></label>
+        <select className="field-input" value={form.category || ""} onChange={(e) => setForm({ ...form, category: e.target.value, rank: "" })}>
+          <option value="" disabled>— Select account —</option>
+          <option value="PACT">PACT — Police Account</option>
+          <option value="FACT">FACT — Police Family Account</option>
+          <option value="BACT">BACT — Arrest Account</option>
+          <option value="EACT">EACT — Emergency Account</option>
+          <option value="CACT">CACT — Citizen Account</option>
+          <option value="WACT">WACT — Polwec Account</option>
+          <option value="RACT">RACT — Retired Police Account</option>
+          <option value="WPACT">WPACT — WP Holder Account</option>
+          <option value="TACT">TACT — Tourist Account</option>
         </select>
       </div>
-      {["Police", "Police EXO", "Police Family", "Police Custody", "Emergency"].includes(form.category) && (
+      {["PACT","FACT","BACT","EACT","WACT","RACT","WPACT"].includes(form.category) && (
         <div className="field-group">
           <label className="field-label">Police Service No <span className="dim" style={{ fontWeight: 400 }}>(4-digit)</span></label>
           <input
@@ -2975,8 +2979,28 @@ function PatientFormFields({ form, setForm, lockId }) {
             maxLength={4}
             placeholder="e.g. 1234"
             value={form.policeServiceNo || ""}
-            onChange={(e) => setForm({ ...form, policeServiceNo: e.target.value.replace(/\D/g, "").slice(0, 4) })}
+            onChange={(e) => setForm({ ...form, policeServiceNo: e.target.value.replace(/[^0-9]/g, "").slice(0, 4) })}
           />
+        </div>
+      )}
+      {form.category === "PACT" && (
+        <div className="field-group">
+          <label className="field-label">Rank</label>
+          <select className="field-input" value={form.rank || ""} onChange={(e) => setForm({ ...form, rank: e.target.value })}>
+            <option value="">— Select rank —</option>
+            <option>Commissioner of Police</option>
+            <option>Deputy Commissioner of Police</option>
+            <option>Assistant Commissioner of Police</option>
+            <option>Chief Superintendent of Police</option>
+            <option>Superintendent of Police</option>
+            <option>Chief Inspector of Police</option>
+            <option>Inspector of Police</option>
+            <option>Sub Inspector of Police</option>
+            <option>Police Senior Sergeant</option>
+            <option>Police Sergeant</option>
+            <option>Police Constable</option>
+            <option>Police Recruit</option>
+          </select>
         </div>
       )}
       <div className="field-group">
@@ -2997,7 +3021,7 @@ function PatientFormFields({ form, setForm, lockId }) {
 function BookAppointmentTab({ state }) {
   const [idInput, setIdInput] = useState("");
   const [phase, setPhase] = useState("lookup"); // lookup | newpatient | book
-  const [patientForm, setPatientForm] = useState({ idNumber: "", name: "", mobile: "", dob: "", sex: "", category: "General", policeServiceNo: "", address: "", notes: "" });
+  const [patientForm, setPatientForm] = useState({ idNumber: "", name: "", mobile: "", dob: "", sex: "", category: "", rank: "", policeServiceNo: "", address: "", notes: "" });
   const [doctorId, setDoctorId] = useState("");
   const [apptDate, setApptDate] = useState(new Date().toISOString().slice(0, 10));
   const [consultationType, setConsultationType] = useState("Walk-in");
@@ -3028,7 +3052,7 @@ function BookAppointmentTab({ state }) {
       const snap = await getDoc(doc(db, "clinicq_patients", id));
       if (snap.exists()) {
         const p = snap.data();
-        setPatientForm({ idNumber: id, name: p.name || "", mobile: p.mobile || "", dob: p.dob || "", sex: p.sex || "", category: p.category || "General", policeServiceNo: p.policeServiceNo || "", address: p.address || "", notes: p.notes || "" });
+        setPatientForm({ idNumber: id, name: p.name || "", mobile: p.mobile || "", dob: p.dob || "", sex: p.sex || "", category: p.category || "", rank: p.rank || "", policeServiceNo: p.policeServiceNo || "", address: p.address || "", notes: p.notes || "" });
         setLookupMsg(`✓ Returning patient — ${p.name}`);
         setPhase("book");
         // Fetch most recent visit for follow-up context
@@ -3092,14 +3116,14 @@ function BookAppointmentTab({ state }) {
       await addDoc(VISITS_COL, {
         patientId: id, name: patientForm.name.trim(), room, doctorId,
         doctorName: doctor.name, token, date: apptDate, status: "waiting", createdAt: now,
-        patientCategory: patientForm.category || "General",
+        patientCategory: patientForm.category || "",
         policeServiceNo: patientForm.policeServiceNo || "",
         consultationType, isFollowUp,
       });
       const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       setLastTicket({ token, room, doctorId, doctorName: doctor.name, name: patientForm.name.trim(), date: apptDate, time: timeStr });
       setMsg(`✓ ${patientForm.name.trim()} booked — Token ${token} · ${doctor.name} · ${apptDate}`);
-      setIdInput(""); setPatientForm({ idNumber: "", name: "", mobile: "", dob: "", sex: "", category: "General", policeServiceNo: "", address: "", notes: "" });
+      setIdInput(""); setPatientForm({ idNumber: "", name: "", mobile: "", dob: "", sex: "", category: "", rank: "", policeServiceNo: "", address: "", notes: "" });
       setDoctorId(""); setPhase("lookup"); setLookupMsg(""); setConsultationType("Walk-in"); setIsFollowUp(false); setLastVisitInfo(null);
     } catch (e) { setMsg("Booking failed: " + e.message); }
     finally { setBusy(false); }
@@ -3181,7 +3205,7 @@ function BookAppointmentTab({ state }) {
                   <strong>{patientForm.name}</strong> · {patientForm.idNumber}
                   {patientForm.dob && ` · Age ${computeAge(patientForm.dob)}`}
                   {patientForm.mobile && ` · ${patientForm.mobile}`}
-                  {patientForm.category && patientForm.category !== "General" && ` · ${patientForm.category}`}
+                  {patientForm.category && ` · ${patientForm.category}`}
                 </div>
                 <button className="btn btn-outline btn-sm" onClick={() => setEditingPatient(true)}>✏️ Edit</button>
               </div>
