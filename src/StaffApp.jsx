@@ -1676,10 +1676,10 @@ function StaffLoginsTab() {
   const [busy, setBusy] = useState(null);
 
   useEffect(() => {
-    getDoc(STAFF_DOC).then((snap) => {
-      const people = snap.exists() ? (snap.data().people || []) : [];
-      // Only doctors and receptionists
-      setStaff(people.filter((p) => p.email));  // Show all staff with an email address
+    import("./supabase.js").then(async ({ supabase, getClinicId }) => {
+      const clinicId = await getClinicId("MALE");
+      const { data } = await supabase.from("staff").select("*").eq("clinic_id", clinicId).order("name");
+      setStaff((data || []).filter(p => p.email).map(p => ({ ...p, idNumber: p.id_number || "" })));
       setLoading(false);
     }).catch(() => setLoading(false));
   }, []);
@@ -1820,7 +1820,7 @@ function AdminSettingsTab({ state, setState }) {
    DEVELOPER PORTAL
 ───────────────────────────────────────────── */
 function DeveloperPortal() {
-  const { state, setState } = useClinicState();
+  const { state, setState, setRoom } = useClinicState();
   const [tab, setTab] = useState("rooms");
   const [newRoom, setNewRoom] = useState("");
 
@@ -1878,17 +1878,7 @@ function DeveloperPortal() {
               <input className="field-input" placeholder="Room ID (e.g. R06)" value={newRoom} onChange={(e) => setNewRoom(e.target.value)} />
               <button className="btn btn-green" onClick={addRoom}>+ Add Room</button>
             </div>
-            <div className="divide-list">
-              {(state.rooms||DEFAULT_ROOMS).map((r) => (
-                <div key={r} className="divide-row">
-                  <div>
-                    <div className="fw-med mono">{r}</div>
-                    <div className="dim" style={{fontSize:"0.82rem"}}>{state.assigned[r]?.name||"Unassigned"} · {state.status[r]}</div>
-                  </div>
-                  <button className="btn btn-red btn-sm" onClick={() => removeRoom(r)}>Remove</button>
-                </div>
-              ))}
-            </div>
+            <DevRoomAssign state={state} setRoom={setRoom} />
           </div>
         )}
 
@@ -1936,101 +1926,41 @@ function DeveloperPortal() {
 ───────────────────────────────────────────── */
 // Build a stable doctorDirectory from the staff list
 // Uses email as the stable key so it never drifts from the login system
+// Syncs Firebase doctorDirectory from Supabase staff table (source of truth)
 async function rebuildDoctorDirectory(people, state, setState, setStaff) {
+  // Build directory only from active doctors in the current staff list (Supabase)
   const dir = {};
-  let staffList = [...people];
-  let staffChanged = false;
-
-  // Build directory from staff with category === "doctor" and active !== false
-  // Login status (role) no longer affects whether they appear in operational dropdowns
-  staffList.filter((p) => p.category === "doctor" && p.active !== false && p.name).forEach((p) => {
-    const key = p.email
-      ? "doc_" + p.email.replace(/[^a-zA-Z0-9]/g, "_")
-      : "doc_" + p.name.replace(/[^a-zA-Z0-9]/g, "_");
+  people.filter(p => p.category === "doctor" && p.active !== false && p.name).forEach(p => {
+    const key = p.email || p.name;
     dir[key] = {
-      id: key,
       name: p.name,
-      specialty: p.designation || "General",
-      idNumber: p.idNumber || "",
-      registrationNo: p.registrationNo || "",
       email: p.email || "",
-      active: true,
+      designation: p.designation || "",
+      consultationTier: p.consultationTier || p.consultation_tier || "",
     };
   });
-
-  // Migrate: any existing doctorDirectory entries not represented in staff get added to staff
-  // (covers doctors added before the staff directory existed, e.g. via old "Add Doctor" UI)
-  const existing = state.doctorDirectory || {};
-  Object.values(existing).forEach((d) => {
-    const inStaff = staffList.find((p) =>
-      (d.email && p.email && p.email.toLowerCase() === d.email.toLowerCase()) ||
-      (!d.email && p.name === d.name)
-    );
-    if (!inStaff && d.name) {
-      // Add to staff as a doctor
-      staffList.push({
-        name: d.name,
-        idNumber: d.idNumber || "",
-        registrationNo: d.registrationNo || "",
-        designation: d.specialty || "General",
-        email: d.email || "",
-        contact: "",
-        category: "doctor",
-        active: d.active !== false, // carry over legacy active flag
-        role: d.email ? "DOCTOR" : null, // assume they have a login if they have an email
-      });
-      staffChanged = true;
-      if (d.active !== false) {
-        const key = d.email
-          ? "doc_" + d.email.replace(/[^a-zA-Z0-9]/g, "_")
-          : "doc_" + d.name.replace(/[^a-zA-Z0-9]/g, "_");
-        if (!dir[key]) dir[key] = { ...d, id: key, active: true };
-      }
-    } else if (inStaff && d.active === false && inStaff.active !== false) {
-      // Legacy inactive flag on the old directory entry wasn't reflected in staff — sync it
-      const idx = staffList.findIndex((p) => p === inStaff);
-      if (idx >= 0) {
-        staffList[idx] = { ...staffList[idx], active: false };
-        staffChanged = true;
-        // Remove from the freshly-built dir if it got included
-        const key = inStaff.email
-          ? "doc_" + inStaff.email.replace(/[^a-zA-Z0-9]/g, "_")
-          : "doc_" + inStaff.name.replace(/[^a-zA-Z0-9]/g, "_");
-        delete dir[key];
-      }
-    }
-  });
-
-  await setState({ ...state, doctorDirectory: dir }, { role: "SYSTEM", action: "rebuildDoctorDirectory" });
-
-  if (staffChanged && setStaff) {
-    await setDoc(STAFF_DOC, { people: staffList });
-    setStaff(staffList);
-  }
+  await setState({ ...state, doctorDirectory: dir }, { role: "SYSTEM", action: "syncDoctorDirectory" });
 }
 
 async function grantRole(person, role, staff, setStaff, state, setState) {
   const createStaffAccount = httpsCallable(functions, "createStaffAccount");
   await createStaffAccount({ email: person.email, name: person.name, role });
-  const merged = staff.map((p) =>
-    (p.idNumber || p.name) === (person.idNumber || person.name) ? { ...p, role } : p
-  );
-  await setDoc(STAFF_DOC, { people: merged });
+  // Update role in Supabase (source of truth)
+  const { supabase } = await import("./supabase.js");
+  await supabase.from("staff").update({ role }).eq("id", person.id);
+  const merged = staff.map(p => p.id === person.id ? { ...p, role } : p);
   setStaff(merged);
-  // Directory is built from category, not role — but email may have just been confirmed,
-  // so rebuild to ensure the directory entry has the correct email-based key.
   if (role === "DOCTOR" || person.category === "doctor") await rebuildDoctorDirectory(merged, state, setState, setStaff);
 }
 
 async function revokeRole(person, staff, setStaff, state, setState) {
   const revoke = httpsCallable(functions, "revokeStaffAccount");
   await revoke({ email: person.email });
-  const merged = staff.map((p) =>
-    (p.idNumber || p.name) === (person.idNumber || person.name) ? { ...p, role: null } : p
-  );
-  await setDoc(STAFF_DOC, { people: merged });
+  // Update role in Supabase (source of truth)
+  const { supabase } = await import("./supabase.js");
+  await supabase.from("staff").update({ role: null }).eq("id", person.id);
+  const merged = staff.map(p => p.id === person.id ? { ...p, role: null } : p);
   setStaff(merged);
-  // Revoking login no longer affects the operational directory (based on category, not role)
 }
 
 /* ─────────────────────────────────────────────
@@ -2044,7 +1974,11 @@ function StaffImportTab({ state, setState }) {
   const fileRef = useRef(null);
 
   useEffect(() => {
-    getDoc(STAFF_DOC).then((snap) => setStaff(snap.exists() ? (snap.data().people || []) : [])).catch(() => {});
+    import("./supabase.js").then(async ({ supabase, getClinicId }) => {
+      const clinicId = await getClinicId("MALE");
+      const { data } = await supabase.from("staff").select("*").eq("clinic_id", clinicId).order("name");
+      setStaff((data || []).map(p => ({ ...p, idNumber: p.id_number || "", email: p.email || "" })));
+    }).catch(() => {});
   }, []);
 
   const parseFile = async (file) => {
@@ -2121,8 +2055,25 @@ function StaffImportTab({ state, setState }) {
         byKey[k] = { ...byKey[k], ...p, role: (staff.find((s) => (s.idNumber || s.name).toLowerCase() === k)?.role) || p.role || null };
       });
       const merged = Object.values(byKey);
-      await setDoc(STAFF_DOC, { people: merged });
-      setStaff(merged);
+      // Import to Supabase (master list)
+      const { supabase, getClinicId } = await import("./supabase.js");
+      const clinicId = await getClinicId("MALE");
+      const rows = merged.map(p => ({
+        clinic_id: clinicId,
+        name: p.name,
+        email: p.email || null,
+        id_number: p.idNumber || null,
+        registration_no: p.registrationNo || null,
+        designation: p.designation || null,
+        category: p.category || "staff",
+        role: p.role || null,
+        active: p.active !== false,
+        consultation_tier: p.consultationTier || null,
+      }));
+      await supabase.from("staff").upsert(rows, { onConflict: "email" });
+      const { data: refreshed } = await supabase.from("staff").select("*").eq("clinic_id", clinicId).order("name");
+      const updated = (refreshed || []).map(p => ({ ...p, idNumber: p.id_number || "", consultationTier: p.consultation_tier || "" }));
+      setStaff(updated);
 
       const doctors = merged.filter((p) => p.category === "doctor");
       const dir = { ...(state.doctorDirectory || {}) };
@@ -2207,9 +2158,25 @@ function StaffDirectoryTab({ state, setState }) {
   const [isNew, setIsNew] = useState(false);
 
   useEffect(() => {
-    getDoc(STAFF_DOC).then((snap) => {
-      setStaff(snap.exists() ? (snap.data().people || []) : []);
-      setLoading(false);
+    import("./supabase.js").then(({ supabase, getClinicId }) => {
+      getClinicId("MALE").then(async (clinicId) => {
+        const { data, error } = await supabase
+          .from("staff")
+          .select("*")
+          .eq("clinic_id", clinicId)
+          .order("name");
+        if (!error) {
+          // Convert Supabase rows to the format the UI expects
+          setStaff((data || []).map(p => ({
+            ...p,
+            idNumber: p.id_number || "",
+            registrationNo: p.registration_no || "",
+            contact: p.contact || "",
+            consultationTier: p.consultation_tier || "",
+          })));
+        }
+        setLoading(false);
+      }).catch(() => setLoading(false));
     }).catch(() => setLoading(false));
   }, []);
 
@@ -2246,21 +2213,38 @@ function StaffDirectoryTab({ state, setState }) {
       const origKey = personKey(staff.find((s) => s === staff.find((x) => personKey(x) === personKey(p))) || p);
       merged = staff.map((s) => (personKey(s) === origKey ? cleaned : s));
     }
-    await setDoc(STAFF_DOC, { people: merged });
-    // Auto-sync doctor directory on every save
+    const { supabase, getClinicId } = await import("./supabase.js");
+    const clinicId = await getClinicId("MALE");
+    const row = {
+      clinic_id:       clinicId,
+      name:            cleaned.name,
+      email:           cleaned.email || null,
+      id_number:       cleaned.idNumber || null,
+      registration_no: cleaned.registrationNo || null,
+      designation:     cleaned.designation || null,
+      category:        cleaned.category || "staff",
+      role:            cleaned.role || null,
+      active:          cleaned.active !== false,
+      consultation_tier: cleaned.consultationTier || null,
+    };
+    if (isNew) {
+      const { error } = await supabase.from("staff").insert(row);
+      if (error) { setMsg("✕ Error: " + error.message); return; }
+    } else {
+      const { error } = await supabase.from("staff").update(row).eq("id", cleaned.id);
+      if (error) { setMsg("✕ Error: " + error.message); return; }
+    }
+    // Reload staff from Supabase
+    const { data } = await supabase.from("staff").select("*").eq("clinic_id", clinicId).order("name");
+    const updated = (data || []).map(p => ({ ...p, idNumber: p.id_number || "", registrationNo: p.registration_no || "", contact: p.contact || "", consultationTier: p.consultation_tier || "" }));
+    setStaff(updated);
+    // Auto-sync doctor directory to Firebase for queue
     const newDir = {};
-    merged.filter(p => p.category === "doctor" && p.active !== false).forEach(p => {
+    updated.filter(p => p.category === "doctor" && p.active !== false).forEach(p => {
       const key = p.email || p.name;
-      newDir[key] = {
-        id: p.id || key,
-        name: p.name,
-        email: p.email || "",
-        designation: p.designation || "",
-        consultationTier: p.consultationTier || "",
-      };
+      newDir[key] = { name: p.name, email: p.email || "", designation: p.designation || "", consultationTier: p.consultation_tier || "" };
     });
     await setDoc(CONFIG_DOC, { doctorDirectory: newDir }, { merge: true });
-    setStaff(merged);
     setMsg(`✓ ${isNew ? "Added" : "Updated"} ${cleaned.name}.`);
     closeForm();
   };
@@ -2297,10 +2281,20 @@ function StaffDirectoryTab({ state, setState }) {
   };
 
   const removePerson = async (person) => {
-    if (!window.confirm(`Remove ${person.name} from the directory? (Does not delete their login if they have one.)`)) return;
-    const merged = staff.filter((p) => (p.idNumber || p.name) !== (person.idNumber || person.name));
-    await setDoc(STAFF_DOC, { people: merged });
-    setStaff(merged);
+    if (!window.confirm(`Permanently delete ${person.name} from the directory? This cannot be undone.`)) return;
+    const { supabase, getClinicId } = await import("./supabase.js");
+    const clinicId = await getClinicId("MALE");
+    await supabase.from("staff").delete().eq("id", person.id);
+    const { data } = await supabase.from("staff").select("*").eq("clinic_id", clinicId).order("name");
+    const updated = (data || []).map(p => ({ ...p, idNumber: p.id_number || "", registrationNo: p.registration_no || "", contact: p.contact || "", consultationTier: p.consultation_tier || "" }));
+    setStaff(updated);
+    // Sync doctor directory
+    const newDir = {};
+    updated.filter(p => p.category === "doctor" && p.active !== false).forEach(p => {
+      const key = p.email || p.name;
+      newDir[key] = { name: p.name, email: p.email || "", designation: p.designation || "", consultationTier: p.consultation_tier || "" };
+    });
+    await setDoc(CONFIG_DOC, { doctorDirectory: newDir }, { merge: true });
   };
 
   const roleOptions = (person) => {
@@ -2319,12 +2313,20 @@ function StaffDirectoryTab({ state, setState }) {
   };
 
   const toggleActive = async (person) => {
-    const merged = staff.map((p) =>
-      (p.idNumber || p.name) === (person.idNumber || person.name) ? { ...p, active: person.active === false ? true : false } : p
-    );
-    await setDoc(STAFF_DOC, { people: merged });
-    setStaff(merged);
-    if (person.category === "doctor") await rebuildDoctorDirectory(merged, state, setState, setStaff);
+    const newActive = person.active === false ? true : false;
+    const { supabase, getClinicId } = await import("./supabase.js");
+    const clinicId = await getClinicId("MALE");
+    await supabase.from("staff").update({ active: newActive }).eq("id", person.id);
+    const { data } = await supabase.from("staff").select("*").eq("clinic_id", clinicId).order("name");
+    const updated = (data || []).map(p => ({ ...p, idNumber: p.id_number || "", registrationNo: p.registration_no || "", contact: p.contact || "", consultationTier: p.consultation_tier || "" }));
+    setStaff(updated);
+    // Sync doctor directory
+    const newDir = {};
+    updated.filter(p => p.category === "doctor" && p.active !== false).forEach(p => {
+      const key = p.email || p.name;
+      newDir[key] = { name: p.name, email: p.email || "", designation: p.designation || "", consultationTier: p.consultation_tier || "" };
+    });
+    await setDoc(CONFIG_DOC, { doctorDirectory: newDir }, { merge: true });
   };
 
   // Summary
@@ -2366,12 +2368,7 @@ function StaffDirectoryTab({ state, setState }) {
             </div>
           ))}
         </div>
-        <button className="btn btn-outline btn-sm" style={{ flexShrink: 0 }} onClick={async () => {
-          try {
-            await rebuildDoctorDirectory(staff, state, setState, setStaff);
-            setMsg("✓ Doctor directory rebuilt from staff list.");
-          } catch (e) { setMsg("Rebuild failed: " + e.message); }
-        }}>↻ Rebuild doctor directory</button>
+
       </div>
 
       <div className="card">
@@ -4427,6 +4424,70 @@ function MemoTab({ state }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+
+function DevRoomAssign({ state, setRoom }) {
+  const [doctors, setDoctors] = useState([]);
+  const [selections, setSelections] = useState({});
+  const [saved, setSaved] = useState({});
+
+  useEffect(() => {
+    import("./supabase.js").then(async ({ supabase, getClinicId }) => {
+      const clinicId = await getClinicId("MALE");
+      const { data } = await supabase
+        .from("staff")
+        .select("*")
+        .eq("clinic_id", clinicId)
+        .eq("category", "doctor")
+        .eq("active", true)
+        .order("name");
+      setDoctors(data || []);
+    }).catch(() => {});
+  }, []);
+
+  const assign = async (roomId) => {
+    const val = selections[roomId];
+    if (val === undefined) return;
+    if (!val) {
+      await setRoom(roomId, { assigned: null });
+    } else {
+      const doc = doctors.find(d => d.email === val || d.name === val);
+      if (doc) await setRoom(roomId, { assigned: { id: doc.email || doc.name, name: doc.name, email: doc.email || "" } });
+    }
+    setSaved(s => ({ ...s, [roomId]: true }));
+    setTimeout(() => setSaved(s => ({ ...s, [roomId]: false })), 2000);
+  };
+
+  return (
+    <div className="divide-list" style={{ marginTop: "1rem" }}>
+      {(state.rooms || DEFAULT_ROOMS).map(r => {
+        const assigned = state.assigned[r];
+        const currentVal = selections[r] !== undefined ? selections[r] : (assigned?.email || assigned?.name || "");
+        return (
+          <div key={r} className="divide-row" style={{ flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
+            <div style={{ flex: "0 0 80px" }}>
+              <div className="fw-med mono">{r}</div>
+              <div className="dim" style={{ fontSize: "0.75rem" }}>{state.status[r] || "IDLE"}</div>
+            </div>
+            <select className="field-input" style={{ flex: 2, minWidth: "180px" }}
+              value={currentVal}
+              onChange={e => setSelections(s => ({ ...s, [r]: e.target.value }))}>
+              <option value="">— Unassigned —</option>
+              {doctors.map(d => (
+                <option key={d.email || d.name} value={d.email || d.name}>
+                  {d.name}{d.designation ? " · " + d.designation : ""}
+                </option>
+              ))}
+            </select>
+            <button className="btn btn-blue btn-sm" onClick={() => assign(r)}>
+              {saved[r] ? "✓ Saved" : "Assign"}
+            </button>
+          </div>
+        );
+      })}
     </div>
   );
 }
