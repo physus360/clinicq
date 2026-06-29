@@ -1933,10 +1933,13 @@ async function rebuildDoctorDirectory(people, state, setState, setStaff) {
   people.filter(p => p.category === "doctor" && p.active !== false && p.name).forEach(p => {
     const key = p.email || p.name;
     dir[key] = {
+      id: key,
       name: p.name,
       email: p.email || "",
+      specialty: p.designation || "General",
       designation: p.designation || "",
       consultationTier: p.consultationTier || p.consultation_tier || "",
+      active: true,
     };
   });
   await setState({ ...state, doctorDirectory: dir }, { role: "SYSTEM", action: "syncDoctorDirectory" });
@@ -2242,7 +2245,15 @@ function StaffDirectoryTab({ state, setState }) {
     const newDir = {};
     updated.filter(p => p.category === "doctor" && p.active !== false).forEach(p => {
       const key = p.email || p.name;
-      newDir[key] = { name: p.name, email: p.email || "", designation: p.designation || "", consultationTier: p.consultation_tier || "" };
+      newDir[key] = {
+        id: key,
+        name: p.name,
+        email: p.email || "",
+        specialty: p.designation || "General",
+        designation: p.designation || "",
+        consultationTier: p.consultation_tier || "",
+        active: true,
+      };
     });
     await setDoc(CONFIG_DOC, { doctorDirectory: newDir }, { merge: true });
     setMsg(`✓ ${isNew ? "Added" : "Updated"} ${cleaned.name}.`);
@@ -2292,7 +2303,15 @@ function StaffDirectoryTab({ state, setState }) {
     const newDir = {};
     updated.filter(p => p.category === "doctor" && p.active !== false).forEach(p => {
       const key = p.email || p.name;
-      newDir[key] = { name: p.name, email: p.email || "", designation: p.designation || "", consultationTier: p.consultation_tier || "" };
+      newDir[key] = {
+        id: key,
+        name: p.name,
+        email: p.email || "",
+        specialty: p.designation || "General",
+        designation: p.designation || "",
+        consultationTier: p.consultation_tier || "",
+        active: true,
+      };
     });
     await setDoc(CONFIG_DOC, { doctorDirectory: newDir }, { merge: true });
   };
@@ -2324,7 +2343,15 @@ function StaffDirectoryTab({ state, setState }) {
     const newDir = {};
     updated.filter(p => p.category === "doctor" && p.active !== false).forEach(p => {
       const key = p.email || p.name;
-      newDir[key] = { name: p.name, email: p.email || "", designation: p.designation || "", consultationTier: p.consultation_tier || "" };
+      newDir[key] = {
+        id: key,
+        name: p.name,
+        email: p.email || "",
+        specialty: p.designation || "General",
+        designation: p.designation || "",
+        consultationTier: p.consultation_tier || "",
+        active: true,
+      };
     });
     await setDoc(CONFIG_DOC, { doctorDirectory: newDir }, { merge: true });
   };
@@ -3323,24 +3350,54 @@ function ActiveAppointmentsTab({ state }) {
 
   const load = async () => {
     try {
-      const q = query(VISITS_COL, where("date", "==", viewDate), limit(200));
-      const snap = await getDocs(q);
-      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      const { supabase, getClinicId } = await import("./supabase.js");
+      const clinicId = await getClinicId("MALE");
+      const { data, error } = await supabase
+        .from("visits")
+        .select("*, patients(name, id_number, category, rank, police_service_no, mobile)")
+        .eq("clinic_id", clinicId)
+        .eq("date", viewDate)
+        .order("token", { ascending: true });
+      if (error) throw new Error(error.message);
+      // Map to format compatible with existing UI
+      const list = (data || []).map(v => ({
+        id: v.id,
+        patientId: v.patients?.id_number || "",
+        name: v.patients?.name || "",
+        room: v.room || "",
+        doctorId: v.doctor_name || "",
+        doctorName: v.doctor_name || "",
+        token: v.token,
+        date: v.date,
+        status: v.status,
+        createdAt: new Date(v.created_at).getTime(),
+        patientCategory: v.patient_category || "",
+        rank: v.patients?.rank || "",
+        policeServiceNo: v.patients?.police_service_no || "",
+        consultationType: v.consultation_type || "Walk-in",
+        isFollowUp: v.is_follow_up || false,
+        supabaseVisitId: v.id,
+      }));
+      // Sort by room then token
       list.sort((a, b) => {
-        if (a.room !== b.room) return a.room.localeCompare(b.room);
+        if ((a.room || "") !== (b.room || "")) return (a.room || "").localeCompare(b.room || "");
         return (a.token || 0) - (b.token || 0);
       });
       setVisits(list);
     } catch (e) {
       console.warn("loadVisits:", e.message);
-      setMsg("Could not load appointments: " + e.message);
     }
   };
   useEffect(() => { load(); }, [viewDate]);
 
-  const cancel = async (id) => {
+  const cancel = async (visit) => {
     if (!window.confirm("Cancel this appointment?")) return;
-    await setDoc(doc(db, "clinicq_visits", id), { status: "cancelled" }, { merge: true });
+    const { supabase } = await import("./supabase.js");
+    await supabase.from("visits").update({ status: "cancelled" }).eq("id", visit.supabaseVisitId || visit.id);
+    // Also update Firestore if it has a Firestore ID
+    if (visit.id && !visit.supabaseVisitId) {
+      await setDoc(doc(db, "clinicq_visits", visit.id), { status: "cancelled" }, { merge: true });
+    }
     load();
   };
 
@@ -3434,7 +3491,7 @@ function ActiveAppointmentsTab({ state }) {
                     <div style={{ display: "flex", gap: "0.3rem" }}>
                       <button className="btn btn-outline btn-sm" onClick={() => reprint(v)} title="Reprint token">🖨</button>
                       {v.status === "waiting" && (
-                        <button className="btn btn-outline btn-sm" onClick={() => cancel(v.id)}>Cancel</button>
+                        <button className="btn btn-outline btn-sm" onClick={() => cancel(v)}>Cancel</button>
                       )}
                     </div>
                   </td>
