@@ -1518,7 +1518,7 @@ function AdminPortal() {
   const TABS = ["rooms", "staff", "stafflogins", "analytics", "audit", "settings"];
   const TAB_LABELS = { rooms: "🏥 Rooms", staff: "👥 Staff Directory", stafflogins: "📧 Login Emails", analytics: "📊 Analytics", audit: "📋 Audit", settings: "⚙️ Settings" };
 
-  const activeDoctors = Object.values(state.doctorDirectory || {}).filter((d) => d.active);
+  const activeDoctors = Object.values(state.doctorDirectory || {}).filter((d) => d.active !== false);
 
   const assign = async (roomId, doctorId) => {
     const d = doctorId ? state.doctorDirectory[doctorId] : null;
@@ -2714,7 +2714,7 @@ function ReceptionPortal() {
   const [tab, setTab] = useState("appointments");
   if (!ready) return <div className="portal-bg"><div className="portal-container"><div className="card dim">Loading…</div></div></div>;
 
-  const activeDoctors = Object.values(state.doctorDirectory || {}).filter((d) => d.active);
+  const activeDoctors = Object.values(state.doctorDirectory || {}).filter((d) => d.active !== false);
 
   const assign = async (roomId, doctorId) => {
     const d = doctorId ? state.doctorDirectory[doctorId] : null;
@@ -3034,7 +3034,7 @@ function BookAppointmentTab({ state }) {
   const [busy, setBusy] = useState(false);
   const [lastTicket, setLastTicket] = useState(null);
 
-  const activeDoctors = Object.values(state.doctorDirectory || {}).filter((d) => d.active);
+  const activeDoctors = Object.values(state.doctorDirectory || {}).filter((d) => d.active !== false);
 
   // Find room for a doctor
   const roomForDoctor = (docId) => {
@@ -3079,9 +3079,8 @@ function BookAppointmentTab({ state }) {
     if (!patientForm.name.trim()) { setMsg("Name is required."); return; }
     setBusy(true);
     try {
-      await setDoc(doc(db, "clinicq_patients", patientForm.idNumber.trim()), {
-        ...patientForm, idNumber: patientForm.idNumber.trim(), updatedAt: Date.now(),
-      }, { merge: true });
+      const { upsertPatient } = await import("./supabase.js");
+      await upsertPatient({ ...patientForm, idNumber: patientForm.idNumber.trim() });
       setMsg("✓ Patient added.");
       setPhase("book");
     } catch (e) { setMsg("Save failed: " + e.message); }
@@ -3092,9 +3091,8 @@ function BookAppointmentTab({ state }) {
     if (!patientForm.name.trim()) { setMsg("Name is required."); return; }
     setEditSaving(true);
     try {
-      await setDoc(doc(db, "clinicq_patients", patientForm.idNumber.trim()), {
-        ...patientForm, idNumber: patientForm.idNumber.trim(), updatedAt: Date.now(),
-      }, { merge: true });
+      const { upsertPatient } = await import("./supabase.js");
+      await upsertPatient({ ...patientForm, idNumber: patientForm.idNumber.trim() });
       setMsg("✓ Patient details updated.");
       setEditingPatient(false);
     } catch (e) { setMsg("Update failed: " + e.message); }
@@ -3103,23 +3101,49 @@ function BookAppointmentTab({ state }) {
 
   const book = async () => {
     if (!doctorId) { setMsg("Please select a doctor."); return; }
+    if (!patientForm.category) { setMsg("Please select a patient account (PACT, CACT etc.)."); return; }
     const doctor = state.doctorDirectory[doctorId];
-    const room = roomForDoctor(doctorId) || "";  // room may not be assigned yet — that's ok
+    const room = roomForDoctor(doctorId) || "";
     setBusy(true); setMsg("");
     try {
       const id = patientForm.idNumber.trim();
       const now = Date.now();
-      await setDoc(doc(db, "clinicq_patients", id), {
-        ...patientForm, idNumber: id, lastVisit: apptDate, updatedAt: now,
-      }, { merge: true });
+      const { upsertPatient, supabase, getClinicId } = await import("./supabase.js");
+
+      // 1. Save/update patient in Supabase
+      const savedPatient = await upsertPatient({ ...patientForm, idNumber: id });
+
+      // 2. Get next token (Firestore — for real-time queue)
       const token = await nextTokenForDoctor(doctorId, apptDate);
+
+      // 3. Save visit to Supabase
+      const clinicId = await getClinicId("MALE");
+      const { data: visit, error: visitErr } = await supabase.from("visits").insert({
+        clinic_id:         clinicId,
+        patient_id:        savedPatient.id,
+        doctor_name:       doctor.name,
+        room:              room,
+        token:             token,
+        date:              apptDate,
+        status:            "waiting",
+        consultation_type: consultationType,
+        is_follow_up:      isFollowUp,
+        patient_category:  patientForm.category || "",
+        created_at:        new Date().toISOString(),
+      }).select().single();
+      if (visitErr) throw new Error(visitErr.message);
+
+      // 4. Also write to Firestore for real-time queue display
       await addDoc(VISITS_COL, {
         patientId: id, name: patientForm.name.trim(), room, doctorId,
-        doctorName: doctor.name, token, date: apptDate, status: "waiting", createdAt: now,
+        doctorName: doctor.name, token, date: apptDate, status: "waiting",
+        createdAt: now, supabaseVisitId: visit.id,
         patientCategory: patientForm.category || "",
         policeServiceNo: patientForm.policeServiceNo || "",
+        rank: patientForm.rank || "",
         consultationType, isFollowUp,
       });
+
       const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       setLastTicket({ token, room, doctorId, doctorName: doctor.name, name: patientForm.name.trim(), date: apptDate, time: timeStr });
       setMsg(`✓ ${patientForm.name.trim()} booked — Token ${token} · ${doctor.name} · ${apptDate}`);
@@ -3295,7 +3319,7 @@ function ActiveAppointmentsTab({ state }) {
   const [visits, setVisits] = useState([]);
   const [viewDate, setViewDate] = useState(new Date().toISOString().slice(0, 10));
   const [filterDoctor, setFilterDoctor] = useState("");
-  const activeDoctors = Object.values(state.doctorDirectory || {}).filter((d) => d.active);
+  const activeDoctors = Object.values(state.doctorDirectory || {}).filter((d) => d.active !== false);
 
   const load = async () => {
     try {
