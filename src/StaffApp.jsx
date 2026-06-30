@@ -3135,16 +3135,79 @@ function BookAppointmentTab({ state }) {
     try {
       const id = patientForm.idNumber.trim();
       const now = Date.now();
-      const { upsertPatient, supabase, getClinicId } = await import("./supabase.js");
+      const { upsertPatient, supabase, getClinicId, getServiceByCode, nextMemoNumber } = await import("./supabase.js");
 
       // 1. Save/update patient in Supabase
       const savedPatient = await upsertPatient({ ...patientForm, idNumber: id });
+      const clinicId = await getClinicId("MALE");
 
-      // 2. Get next token (Firestore — for real-time queue)
+      // 2. Determine consultation code from doctor tier + consultation type
+      let memoNo = null;
+      let memoId = null;
+      const tier = doctor.consultationTier;
+      if (tier && TIER_CODES[tier]) {
+        const codes = TIER_CODES[tier];
+        const conCode = isFollowUp ? codes.followup
+          : consultationType === "Online" ? codes.online
+          : consultationType === "Midnight" ? codes.midnight
+          : codes.walkin;
+
+        if (conCode) {
+          try {
+            const service = await getServiceByCode(conCode);
+            if (service) {
+              const billing = calculateLineBilling(service, patientForm.category);
+              memoNo = await nextMemoNumber(clinicId, "clinic");
+              const { data: memo, error: memoErr } = await supabase.from("memos").insert({
+                clinic_id:      clinicId,
+                memo_no:        memoNo,
+                date:           apptDate,
+                patient_id:     savedPatient.id,
+                account_code:   patientForm.category,
+                doctor_name:    doctor.name,
+                room:           room,
+                token:          null, // set after token assigned
+                total_clinic:   billing.total,
+                total_aasandha: billing.aasandha,
+                total_account:  billing.account,
+                total_patient:  billing.patient,
+                total_amount:   billing.total,
+                status:         "active",
+                created_by:     state?.user?.email || "",
+              }).select().single();
+              if (memoErr) throw new Error("Memo: " + memoErr.message);
+              memoId = memo.id;
+
+              await supabase.from("memo_lines").insert({
+                memo_id:         memo.id,
+                service_id:      service.id,
+                service_code:    service.code,
+                service_name:    service.name,
+                qty:              1,
+                unit_price:      service.clinic_price,
+                aasandha_amount: billing.aasandha,
+                account_amount:  billing.account,
+                patient_amount:  billing.patient,
+                line_total:      billing.total,
+                sort_order:      0,
+              });
+            }
+          } catch (memoErr) {
+            console.warn("Memo auto-generation failed:", memoErr.message);
+            // Don't block booking if memo fails — reception can create manually later
+          }
+        }
+      }
+
+      // 3. Get next token (Firestore — for real-time queue)
       const token = await nextTokenForDoctor(doctorId, apptDate);
 
-      // 3. Save visit to Supabase
-      const clinicId = await getClinicId("MALE");
+      // 4. Update memo with token number now that we have it
+      if (memoId) {
+        await supabase.from("memos").update({ token }).eq("id", memoId);
+      }
+
+      // 5. Save visit to Supabase
       const { data: visit, error: visitErr } = await supabase.from("visits").insert({
         clinic_id:         clinicId,
         patient_id:        savedPatient.id,
@@ -3160,11 +3223,11 @@ function BookAppointmentTab({ state }) {
       }).select().single();
       if (visitErr) throw new Error(visitErr.message);
 
-      // 4. Also write to Firestore for real-time queue display
+      // 6. Also write to Firestore for real-time queue display
       await addDoc(VISITS_COL, {
         patientId: id, name: patientForm.name.trim(), room, doctorId,
         doctorName: doctor.name, token, date: apptDate, status: "waiting",
-        createdAt: now, supabaseVisitId: visit.id,
+        createdAt: now, supabaseVisitId: visit.id, memoId, memoNo,
         patientCategory: patientForm.category || "",
         policeServiceNo: patientForm.policeServiceNo || "",
         rank: patientForm.rank || "",
@@ -3172,8 +3235,8 @@ function BookAppointmentTab({ state }) {
       });
 
       const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-      setLastTicket({ token, room, doctorId, doctorName: doctor.name, name: patientForm.name.trim(), date: apptDate, time: timeStr });
-      setMsg(`✓ ${patientForm.name.trim()} booked — Token ${token} · ${doctor.name} · ${apptDate}`);
+      setLastTicket({ token, room, doctorId, doctorName: doctor.name, name: patientForm.name.trim(), date: apptDate, time: timeStr, memoNo });
+      setMsg(`✓ ${patientForm.name.trim()} booked — Token ${token}${memoNo ? " · Memo " + memoNo : ""} · ${doctor.name} · ${apptDate}`);
       setIdInput(""); setPatientForm({ idNumber: "", name: "", mobile: "", dob: "", sex: "", category: "", rank: "", policeServiceNo: "", address: "", notes: "" });
       setDoctorId(""); setPhase("lookup"); setLookupMsg(""); setConsultationType("Walk-in"); setIsFollowUp(false); setLastVisitInfo(null);
     } catch (e) { setMsg("Booking failed: " + e.message); }
@@ -3435,6 +3498,27 @@ function ActiveAppointmentsTab({ state }) {
   const served = filtered.filter((v) => v.status === "served").length;
   const cancelled = filtered.filter((v) => v.status === "cancelled" || v.status === "cleared").length;
 
+  // Group by room (or doctor's current assignment if room not on visit)
+  const groups = {};
+  filtered.filter(v => v.status !== "cancelled" && v.status !== "cleared").forEach(v => {
+    let roomKey = v.room;
+    let doctorLabel = v.doctorName || "—";
+    if (!roomKey) {
+      const assignedRoom = Object.entries(state.assigned || {}).find(
+        ([, a]) => a && (a.id === v.doctorId || a.name === v.doctorName)
+      );
+      roomKey = assignedRoom ? assignedRoom[0] : "unassigned";
+    }
+    const key = roomKey + "|" + doctorLabel;
+    if (!groups[key]) groups[key] = { room: roomKey, doctor: doctorLabel, visits: [] };
+    groups[key].visits.push(v);
+  });
+  const groupList = Object.values(groups).sort((a, b) => {
+    if (a.room === "unassigned") return 1;
+    if (b.room === "unassigned") return -1;
+    return a.room.localeCompare(b.room);
+  });
+
   return (
     <div className="card">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem", flexWrap: "wrap", gap: "0.5rem" }}>
@@ -3457,48 +3541,64 @@ function ActiveAppointmentsTab({ state }) {
         ))}
       </div>
 
-      {filtered.length === 0 ? (
-        <div className="dim">No appointments for this date.</div>
+      {groupList.length === 0 ? (
+        <div className="dim">No active appointments for this date.</div>
       ) : (
-        <div className="table-wrap">
-          <table className="data-table">
-            <thead><tr><th>#</th><th>Patient</th><th>Doctor</th><th>Room</th><th>Status</th><th></th></tr></thead>
-            <tbody>
-              {filtered.map((v) => (
-                <tr key={v.id} style={{ opacity: v.status === "cancelled" || v.status === "cleared" ? 0.45 : 1 }}>
-                  <td style={{ fontWeight: 700 }}>{v.token}</td>
-                  <td>{v.name}</td>
-                  <td>{v.doctorName || "—"}</td>
-                  <td className="mono" style={{ fontSize: "0.85rem" }}>
-                    {(() => {
-                      if (v.room) return roomDisplay(v.room);
-                      // Look up doctor's current room from live state
-                      const assignedRoom = Object.entries(state.assigned || {}).find(
-                        ([, a]) => a && (a.id === v.doctorId || a.name === v.doctorName)
-                      );
-                      return assignedRoom
-                        ? <span style={{ color: "var(--blue)" }}>{roomDisplay(assignedRoom[0])}</span>
-                        : <span className="dim">Not assigned</span>;
-                    })()}
-                  </td>
-                  <td>
-                    <span className="status-pill" style={{
-                      background: v.status === "served" ? "#64748b22" : v.status === "cancelled" || v.status === "cleared" ? "#ef444422" : "#16a34a22",
-                      color: v.status === "served" ? "#64748b" : v.status === "cancelled" || v.status === "cleared" ? "#ef4444" : "#16a34a",
-                    }}>{v.status}</span>
-                  </td>
-                  <td>
-                    <div style={{ display: "flex", gap: "0.3rem" }}>
-                      <button className="btn btn-outline btn-sm" onClick={() => reprint(v)} title="Reprint token">🖨</button>
-                      {v.status === "waiting" && (
-                        <button className="btn btn-outline btn-sm" onClick={() => cancel(v)}>Cancel</button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+          {groupList.map(g => (
+            <div key={g.room + g.doctor}>
+              <div style={{ fontWeight: 700, fontSize: "0.9rem", marginBottom: "0.4rem" }}>
+                {g.room === "unassigned" ? "Unassigned" : roomDisplay(g.room)}
+                {g.doctor !== "—" && <span className="dim" style={{ fontWeight: 400 }}> · {g.doctor}</span>}
+              </div>
+              <div className="table-wrap">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>#</th><th>Patient</th><th>Acct</th><th>Type</th><th>Memo</th><th>Actions</th><th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {g.visits.map(v => (
+                      <tr key={v.id}>
+                        <td style={{ fontWeight: 700 }}>{v.token}</td>
+                        <td>
+                          <div>{v.name}</div>
+                          {(v.rank || v.policeServiceNo) && (
+                            <div className="dim" style={{ fontSize: "0.72rem" }}>
+                              {v.rank ? v.rank.replace(" of Police", "") : ""}{v.rank && v.policeServiceNo ? " · " : ""}{v.policeServiceNo ? "Svc:" + v.policeServiceNo : ""}
+                            </div>
+                          )}
+                        </td>
+                        <td className="mono" style={{ fontSize: "0.8rem" }}>{v.patientCategory || "—"}</td>
+                        <td style={{ fontSize: "0.82rem" }}>{v.consultationType}{v.isFollowUp ? " · F/U" : ""}</td>
+                        <td style={{ fontSize: "0.78rem" }}>
+                          {v.memoNo && <div className="mono">{v.memoNo}</div>}
+                          {v.labMemoNo && <div className="mono" style={{ color: "var(--blue)" }}>{v.labMemoNo}</div>}
+                          {!v.memoNo && !v.labMemoNo && <span className="dim">—</span>}
+                        </td>
+                        <td>
+                          <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
+                            {!v.labMemoNo && (
+                              <button className="btn btn-outline btn-sm" onClick={() => onLabMemo && onLabMemo(v)}>🧪 Lab</button>
+                            )}
+                            <button className="btn btn-outline btn-sm" onClick={() => onServiceMemo && onServiceMemo(v)}>📋 Svc</button>
+                            <button className="btn btn-outline btn-sm" onClick={() => reprint(v)} title="Reprint token">🖨</button>
+                          </div>
+                        </td>
+                        <td>
+                          {v.status === "waiting" && (
+                            <button className="btn btn-sm" style={{ background: "var(--red-bg, #fef2f2)", color: "var(--red)", border: "1px solid var(--red)" }}
+                              onClick={() => cancel(v)}>Cancel</button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>

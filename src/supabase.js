@@ -91,6 +91,49 @@ export async function getServiceByCode(code) {
   return data;
 }
 
+// ── Service usage tracking (for dynamic quick-picks) ──────────
+export async function trackServiceUsage(clinicId, serviceCode) {
+  try {
+    await supabase.rpc("increment_service_usage", {
+      p_clinic_id: clinicId,
+      p_service_code: serviceCode,
+    });
+  } catch (e) {
+    console.warn("trackServiceUsage:", e.message);
+  }
+}
+
+const CONSULTATION_CODES = [
+  "CON0001","CON0002","CON0007","CON0008","CON0009","CON0013",
+  "CON0015","CON0022","CON0026","CON0027","CON0028","CON0032","CON0035",
+];
+
+export async function getQuickPickServices(clinicId, limit = 4) {
+  try {
+    const { data, error } = await supabase
+      .from("service_usage")
+      .select("service_code, usage_count")
+      .eq("clinic_id", clinicId)
+      .order("usage_count", { ascending: false })
+      .limit(20); // fetch extra in case some are consultation codes
+    if (error || !data || data.length === 0) return [];
+
+    const nonConsultation = data.filter(d => !CONSULTATION_CODES.includes(d.service_code)).slice(0, limit);
+    if (nonConsultation.length === 0) return [];
+
+    const codes = nonConsultation.map(d => d.service_code);
+    const { data: services } = await supabase
+      .from("services")
+      .select("*")
+      .in("code", codes);
+    // Preserve usage-count order
+    return codes.map(c => services?.find(s => s.code === c)).filter(Boolean);
+  } catch (e) {
+    console.warn("getQuickPickServices:", e.message);
+    return [];
+  }
+}
+
 // ── Billing account helpers ─────────────────────────────────
 export async function getBillingAccounts() {
   const { data, error } = await supabase
