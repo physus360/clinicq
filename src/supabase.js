@@ -46,6 +46,18 @@ export async function getPatientByIdNumber(idNumber) {
 }
 
 export async function upsertPatient(patient) {
+  // Don't overwrite category/rank with empty values if patient already exists
+  // (prevents accidental data loss from stale form state)
+  let existingCategory = null;
+  let existingRank = null;
+  if (!patient.category || !patient.rank) {
+    try {
+      const existing = await getPatientByIdNumber(patient.idNumber);
+      existingCategory = existing?.category || null;
+      existingRank = existing?.rank || null;
+    } catch {}
+  }
+
   const { data, error } = await supabase
     .from("patients")
     .upsert({
@@ -54,8 +66,8 @@ export async function upsertPatient(patient) {
       dob:               patient.dob || null,
       sex:               patient.sex || null,
       mobile:            patient.mobile || null,
-      category:          patient.category || null,
-      rank:              patient.rank || null,
+      category:          patient.category || existingCategory || null,
+      rank:              patient.rank || existingRank || null,
       police_service_no: patient.policeServiceNo || null,
       address:           patient.address || null,
       notes:             patient.notes || null,

@@ -2862,9 +2862,10 @@ function PatientRecordsTab() {
     if (!id) return;
     setSearching(true); setMsg("");
     try {
-      const snap = await getDoc(doc(db, "clinicq_patients", id));
-      if (snap.exists()) {
-        const p = { id: snap.id, ...snap.data() };
+      const { getPatientByIdNumber } = await import("./supabase.js");
+      const pRaw = await getPatientByIdNumber(id);
+      if (pRaw) {
+        const p = { id: pRaw.id, idNumber: pRaw.id_number, name: pRaw.name, mobile: pRaw.mobile, dob: pRaw.dob, sex: pRaw.sex, category: pRaw.category, rank: pRaw.rank, policeServiceNo: pRaw.police_service_no, address: pRaw.address, notes: pRaw.notes };
         setPatient(p);
         setForm({ idNumber: p.idNumber || id, name: p.name || "", mobile: p.mobile || "", dob: p.dob || "", sex: p.sex || "", category: p.category || "", rank: p.rank || "", policeServiceNo: p.policeServiceNo || "", address: p.address || "", notes: p.notes || "" });
         setPhase("found");
@@ -3046,6 +3047,23 @@ function PatientFormFields({ form, setForm, lockId }) {
    BOOK APPOINTMENT TAB — two-step: ID lookup → book
 ───────────────────────────────────────────── */
 function BookAppointmentTab({ state }) {
+  const [supabaseDoctors, setSupabaseDoctors] = useState([]);
+  useEffect(() => {
+    import("./supabase.js").then(async ({ supabase, getClinicId }) => {
+      const clinicId = await getClinicId("MALE");
+      const { data } = await supabase.from("staff")
+        .select("*").eq("clinic_id", clinicId)
+        .eq("category", "doctor").eq("active", true).order("name");
+      setSupabaseDoctors((data || []).map(d => ({
+        id: d.email || d.name,
+        name: d.name,
+        email: d.email || "",
+        specialty: d.designation || "General",
+        consultationTier: d.consultation_tier || "",
+        active: true,
+      })));
+    }).catch(() => {});
+  }, []);
   const [idInput, setIdInput] = useState("");
   const [phase, setPhase] = useState("lookup"); // lookup | newpatient | book
   const [patientForm, setPatientForm] = useState({ idNumber: "", name: "", mobile: "", dob: "", sex: "", category: "", rank: "", policeServiceNo: "", address: "", notes: "" });
@@ -3057,11 +3075,14 @@ function BookAppointmentTab({ state }) {
   const [editingPatient, setEditingPatient] = useState(false);
   const [editSaving, setEditSaving] = useState(false);
   const [lookupMsg, setLookupMsg] = useState("");
+  const { user } = useAuth();
   const [msg, setMsg] = useState("");
+  const [msgType, setMsgType] = useState("info");
+  const [bookConfirm, setBookConfirm] = useState(null); // { memoNo, token, name, doctorName } | null
   const [busy, setBusy] = useState(false);
   const [lastTicket, setLastTicket] = useState(null);
 
-  const activeDoctors = Object.values(state.doctorDirectory || {}).filter((d) => d.active !== false);
+  const activeDoctors = supabaseDoctors;
 
   // Find room for a doctor
   const roomForDoctor = (docId) => {
@@ -3076,9 +3097,10 @@ function BookAppointmentTab({ state }) {
     setEditingPatient(false); setConsultationType("Walk-in"); setIsFollowUp(false);
     setDoctorId(""); setLastTicket(null);
     try {
-      const snap = await getDoc(doc(db, "clinicq_patients", id));
-      if (snap.exists()) {
-        const p = snap.data();
+      const { getPatientByIdNumber } = await import("./supabase.js");
+      const pRaw = await getPatientByIdNumber(id);
+      if (pRaw) {
+        const p = { name: pRaw.name, mobile: pRaw.mobile, dob: pRaw.dob, sex: pRaw.sex, category: pRaw.category, rank: pRaw.rank, policeServiceNo: pRaw.police_service_no, address: pRaw.address, notes: pRaw.notes };
         setPatientForm({ idNumber: id, name: p.name || "", mobile: p.mobile || "", dob: p.dob || "", sex: p.sex || "", category: p.category || "", rank: p.rank || "", policeServiceNo: p.policeServiceNo || "", address: p.address || "", notes: p.notes || "" });
         setLookupMsg(`✓ Returning patient — ${p.name}`);
         setPhase("book");
@@ -3129,23 +3151,35 @@ function BookAppointmentTab({ state }) {
   const book = async () => {
     if (!doctorId) { setMsg("Please select a doctor."); return; }
     if (!patientForm.category) { setMsg("Please select a patient account (PACT, CACT etc.)."); return; }
-    const doctor = state.doctorDirectory[doctorId];
+    const doctor = supabaseDoctors.find(d => d.id === doctorId) || state.doctorDirectory[doctorId];
     const room = roomForDoctor(doctorId) || "";
-    setBusy(true); setMsg("");
+    setBusy(true); setMsg(""); setMsgType("info");
     try {
       const id = patientForm.idNumber.trim();
       const now = Date.now();
       const { upsertPatient, supabase, getClinicId, getServiceByCode, nextMemoNumber } = await import("./supabase.js");
 
       // 1. Save/update patient in Supabase
-      const savedPatient = await upsertPatient({ ...patientForm, idNumber: id });
+      let savedPatient;
+      try {
+        savedPatient = await upsertPatient({ ...patientForm, idNumber: id });
+      } catch (patErr) {
+        setMsg("Booking failed: could not save patient — " + patErr.message);
+        setMsgType("error");
+        setBusy(false);
+        return;
+      }
       const clinicId = await getClinicId("MALE");
 
       // 2. Determine consultation code from doctor tier + consultation type
       let memoNo = null;
       let memoId = null;
+      let memoWarning = "";
       const tier = doctor.consultationTier;
-      if (tier && TIER_CODES[tier]) {
+
+      if (!tier) {
+        memoWarning = `No memo created: Dr. ${doctor.name} has no consultation tier set. Ask Admin to set it in Staff Directory, then create the memo manually from Active Appointments.`;
+      } else if (TIER_CODES[tier]) {
         const codes = TIER_CODES[tier];
         const conCode = isFollowUp ? codes.followup
           : consultationType === "Online" ? codes.online
@@ -3166,16 +3200,16 @@ function BookAppointmentTab({ state }) {
                 account_code:   patientForm.category,
                 doctor_name:    doctor.name,
                 room:           room,
-                token:          null, // set after token assigned
+                token:          null,
                 total_clinic:   billing.total,
                 total_aasandha: billing.aasandha,
                 total_account:  billing.account,
                 total_patient:  billing.patient,
                 total_amount:   billing.total,
                 status:         "active",
-                created_by:     state?.user?.email || "",
+                created_by:     user?.email || "",
               }).select().single();
-              if (memoErr) throw new Error("Memo: " + memoErr.message);
+              if (memoErr) throw new Error(memoErr.message);
               memoId = memo.id;
 
               await supabase.from("memo_lines").insert({
@@ -3191,16 +3225,26 @@ function BookAppointmentTab({ state }) {
                 line_total:      billing.total,
                 sort_order:      0,
               });
+            } else {
+              memoWarning = `No memo created: consultation service ${conCode} not found in service list. Please contact Developer.`;
             }
           } catch (memoErr) {
+            memoWarning = `Memo could not be created: ${memoErr.message}. Please create it manually from Active Appointments.`;
             console.warn("Memo auto-generation failed:", memoErr.message);
-            // Don't block booking if memo fails — reception can create manually later
           }
         }
       }
 
       // 3. Get next token (Firestore — for real-time queue)
-      const token = await nextTokenForDoctor(doctorId, apptDate);
+      let token;
+      try {
+        token = await nextTokenForDoctor(doctorId, apptDate);
+      } catch (tokenErr) {
+        setMsg(`Booking partially failed — ${memoNo ? "memo " + memoNo + " was created, but" : ""} token assignment failed: ${tokenErr.message}. Contact Developer.`);
+        setMsgType("error");
+        setBusy(false);
+        return;
+      }
 
       // 4. Update memo with token number now that we have it
       if (memoId) {
@@ -3208,20 +3252,29 @@ function BookAppointmentTab({ state }) {
       }
 
       // 5. Save visit to Supabase
-      const { data: visit, error: visitErr } = await supabase.from("visits").insert({
-        clinic_id:         clinicId,
-        patient_id:        savedPatient.id,
-        doctor_name:       doctor.name,
-        room:              room,
-        token:             token,
-        date:              apptDate,
-        status:            "waiting",
-        consultation_type: consultationType,
-        is_follow_up:      isFollowUp,
-        patient_category:  patientForm.category || "",
-        created_at:        new Date().toISOString(),
-      }).select().single();
-      if (visitErr) throw new Error(visitErr.message);
+      let visit;
+      try {
+        const { data, error: visitErr } = await supabase.from("visits").insert({
+          clinic_id:         clinicId,
+          patient_id:        savedPatient.id,
+          doctor_name:       doctor.name,
+          room:              room,
+          token:             token,
+          date:              apptDate,
+          status:            "waiting",
+          consultation_type: consultationType,
+          is_follow_up:      isFollowUp,
+          patient_category:  patientForm.category || "",
+          created_at:        new Date().toISOString(),
+        }).select().single();
+        if (visitErr) throw new Error(visitErr.message);
+        visit = data;
+      } catch (visitErr) {
+        setMsg(`Booking partially failed — ${memoNo ? "memo " + memoNo + " and " : ""}token ${token} were created, but the visit record failed to save: ${visitErr.message}. Contact Developer.`);
+        setMsgType("error");
+        setBusy(false);
+        return;
+      }
 
       // 6. Also write to Firestore for real-time queue display
       await addDoc(VISITS_COL, {
@@ -3236,10 +3289,24 @@ function BookAppointmentTab({ state }) {
 
       const timeStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       setLastTicket({ token, room, doctorId, doctorName: doctor.name, name: patientForm.name.trim(), date: apptDate, time: timeStr, memoNo });
-      setMsg(`✓ ${patientForm.name.trim()} booked — Token ${token}${memoNo ? " · Memo " + memoNo : ""} · ${doctor.name} · ${apptDate}`);
+
+      if (memoWarning) {
+        setMsg(`✓ ${patientForm.name.trim()} booked — Token ${token} · ${doctor.name} · ${apptDate}. ⚠ ${memoWarning}`);
+        setMsgType("warning");
+      } else {
+        setMsg(`✓ ${patientForm.name.trim()} booked — Token ${token}${memoNo ? " · Memo " + memoNo : ""} · ${doctor.name} · ${apptDate}`);
+        setMsgType("success");
+        if (memoNo) {
+          setBookConfirm({ memoNo, token, name: patientForm.name.trim(), doctorName: doctor.name });
+        }
+      }
+
       setIdInput(""); setPatientForm({ idNumber: "", name: "", mobile: "", dob: "", sex: "", category: "", rank: "", policeServiceNo: "", address: "", notes: "" });
       setDoctorId(""); setPhase("lookup"); setLookupMsg(""); setConsultationType("Walk-in"); setIsFollowUp(false); setLastVisitInfo(null);
-    } catch (e) { setMsg("Booking failed: " + e.message); }
+    } catch (e) {
+      setMsg("Booking failed: " + e.message);
+      setMsgType("error");
+    }
     finally { setBusy(false); }
   };
 
@@ -3376,7 +3443,14 @@ function BookAppointmentTab({ state }) {
           </div>
         )}
 
-        {msg && <div style={{ fontSize: "0.85rem", marginBottom: "0.75rem", color: msg.startsWith("✓") ? "var(--green)" : "var(--red)" }}>{msg}</div>}
+        {msg && (
+          <div style={{
+            fontSize: "0.85rem", marginBottom: "0.75rem", padding: "0.6rem 0.8rem", borderRadius: "8px",
+            background: msgType === "success" ? "#f0fdf4" : msgType === "warning" ? "#fffbeb" : msgType === "error" ? "#fef2f2" : "transparent",
+            color: msgType === "success" ? "var(--green)" : msgType === "warning" ? "#b45309" : msgType === "error" ? "var(--red)" : "var(--text)",
+            border: msgType === "warning" ? "1px solid #fcd34d" : "none",
+          }}>{msg}</div>
+        )}
 
         {phase === "book" && (
           <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
@@ -3409,7 +3483,7 @@ function ActiveAppointmentsTab({ state }) {
   const [visits, setVisits] = useState([]);
   const [viewDate, setViewDate] = useState(new Date().toISOString().slice(0, 10));
   const [filterDoctor, setFilterDoctor] = useState("");
-  const activeDoctors = Object.values(state.doctorDirectory || {}).filter((d) => d.active !== false);
+  const [memoModal, setMemoModal] = useState(null); // { visit, type } | null
 
   const load = async () => {
     try {
@@ -3420,32 +3494,43 @@ function ActiveAppointmentsTab({ state }) {
         .select("*, patients(name, id_number, category, rank, police_service_no, mobile)")
         .eq("clinic_id", clinicId)
         .eq("date", viewDate)
-        .order("token", { ascending: true });
+        .order("created_at", { ascending: false });
       if (error) throw new Error(error.message);
-      // Map to format compatible with existing UI
-      const list = (data || []).map(v => ({
-        id: v.id,
-        patientId: v.patients?.id_number || "",
-        name: v.patients?.name || "",
-        room: v.room || "",
-        doctorId: v.doctor_name || "",
-        doctorName: v.doctor_name || "",
-        token: v.token,
-        date: v.date,
-        status: v.status,
-        createdAt: new Date(v.created_at).getTime(),
-        patientCategory: v.patient_category || "",
-        rank: v.patients?.rank || "",
-        policeServiceNo: v.patients?.police_service_no || "",
-        consultationType: v.consultation_type || "Walk-in",
-        isFollowUp: v.is_follow_up || false,
-        supabaseVisitId: v.id,
-      }));
-      // Sort by room then token
-      list.sort((a, b) => {
-        if ((a.room || "") !== (b.room || "")) return (a.room || "").localeCompare(b.room || "");
-        return (a.token || 0) - (b.token || 0);
+
+      // Fetch memos for this date to attach memo numbers to visits
+      const { data: memos } = await supabase
+        .from("memos").select("memo_no, patient_id, doctor_name, status")
+        .eq("clinic_id", clinicId).eq("date", viewDate).eq("status", "active");
+      const { data: labMemos } = await supabase
+        .from("lab_memos").select("memo_no, patient_id, doctor_name, status")
+        .eq("clinic_id", clinicId).eq("date", viewDate).eq("status", "active");
+
+      const list = (data || []).map(v => {
+        const memo = (memos || []).find(m => m.patient_id === v.patient_id && m.doctor_name === v.doctor_name);
+        const labMemo = (labMemos || []).find(m => m.patient_id === v.patient_id && m.doctor_name === v.doctor_name);
+        return {
+          id: v.id,
+          patientId: v.patients?.id_number || "",
+          name: v.patients?.name || "",
+          room: v.room || "",
+          doctorId: v.doctor_name || "",
+          doctorName: v.doctor_name || "",
+          token: v.token,
+          date: v.date,
+          status: v.status,
+          createdAt: new Date(v.created_at).getTime(),
+          patientCategory: v.patient_category || "",
+          rank: v.patients?.rank || "",
+          policeServiceNo: v.patients?.police_service_no || "",
+          consultationType: v.consultation_type || "Walk-in",
+          isFollowUp: v.is_follow_up || false,
+          supabaseVisitId: v.id,
+          memoNo: memo?.memo_no || null,
+          labMemoNo: labMemo?.memo_no || null,
+        };
       });
+      // Most recent first (already ordered by created_at desc from query, but ensure)
+      list.sort((a, b) => b.createdAt - a.createdAt);
       setVisits(list);
     } catch (e) {
       console.warn("loadVisits:", e.message);
@@ -3457,7 +3542,6 @@ function ActiveAppointmentsTab({ state }) {
     if (!window.confirm("Cancel this appointment?")) return;
     const { supabase } = await import("./supabase.js");
     await supabase.from("visits").update({ status: "cancelled" }).eq("id", visit.supabaseVisitId || visit.id);
-    // Also update Firestore if it has a Firestore ID
     if (visit.id && !visit.supabaseVisitId) {
       await setDoc(doc(db, "clinicq_visits", visit.id), { status: "cancelled" }, { merge: true });
     }
@@ -3493,31 +3577,20 @@ function ActiveAppointmentsTab({ state }) {
     w.document.close(); w.focus();
   };
 
-  const filtered = filterDoctor ? visits.filter((v) => v.doctorId === filterDoctor || v.doctorName === filterDoctor) : visits;
+  const activeVisits = visits.filter(v => v.status !== "cancelled" && v.status !== "cleared");
+
+  // Build doctor tab list from visits actually present today, most recently active first
+  const doctorTabs = [];
+  const seen = new Set();
+  activeVisits.forEach(v => {
+    const key = v.doctorName || "—";
+    if (!seen.has(key)) { seen.add(key); doctorTabs.push(key); }
+  });
+
+  const filtered = filterDoctor ? activeVisits.filter(v => v.doctorName === filterDoctor) : activeVisits;
   const waiting = filtered.filter((v) => v.status === "waiting").length;
   const served = filtered.filter((v) => v.status === "served").length;
-  const cancelled = filtered.filter((v) => v.status === "cancelled" || v.status === "cleared").length;
-
-  // Group by room (or doctor's current assignment if room not on visit)
-  const groups = {};
-  filtered.filter(v => v.status !== "cancelled" && v.status !== "cleared").forEach(v => {
-    let roomKey = v.room;
-    let doctorLabel = v.doctorName || "—";
-    if (!roomKey) {
-      const assignedRoom = Object.entries(state.assigned || {}).find(
-        ([, a]) => a && (a.id === v.doctorId || a.name === v.doctorName)
-      );
-      roomKey = assignedRoom ? assignedRoom[0] : "unassigned";
-    }
-    const key = roomKey + "|" + doctorLabel;
-    if (!groups[key]) groups[key] = { room: roomKey, doctor: doctorLabel, visits: [] };
-    groups[key].visits.push(v);
-  });
-  const groupList = Object.values(groups).sort((a, b) => {
-    if (a.room === "unassigned") return 1;
-    if (b.room === "unassigned") return -1;
-    return a.room.localeCompare(b.room);
-  });
+  const cancelled = visits.filter((v) => v.status === "cancelled" || v.status === "cleared").length;
 
   return (
     <div className="card">
@@ -3525,10 +3598,6 @@ function ActiveAppointmentsTab({ state }) {
         <h2 className="card-title" style={{ margin: 0 }}>Appointments</h2>
         <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
           <input type="date" className="field-input" style={{ width: "auto" }} value={viewDate} onChange={(e) => setViewDate(e.target.value)} />
-          <select className="field-input" style={{ width: "auto" }} value={filterDoctor} onChange={(e) => setFilterDoctor(e.target.value)}>
-            <option value="">All doctors</option>
-            {activeDoctors.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-          </select>
           <button className="btn btn-outline btn-sm" onClick={load}>↻</button>
         </div>
       </div>
@@ -3541,64 +3610,108 @@ function ActiveAppointmentsTab({ state }) {
         ))}
       </div>
 
-      {groupList.length === 0 ? (
-        <div className="dim">No active appointments for this date.</div>
+      {/* Doctor tabs */}
+      <div style={{ display: "flex", gap: "0.4rem", marginBottom: "1.25rem", flexWrap: "wrap" }}>
+        <button className={`btn btn-sm ${!filterDoctor ? "btn-blue" : "btn-outline"}`} onClick={() => setFilterDoctor("")}>
+          All ({activeVisits.length})
+        </button>
+        {doctorTabs.map(name => {
+          const count = activeVisits.filter(v => v.doctorName === name).length;
+          return (
+            <button key={name} className={`btn btn-sm ${filterDoctor === name ? "btn-blue" : "btn-outline"}`}
+              onClick={() => setFilterDoctor(name)}>
+              {name} ({count})
+            </button>
+          );
+        })}
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="dim">No active appointments for this date{filterDoctor ? " with " + filterDoctor : ""}.</div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
-          {groupList.map(g => (
-            <div key={g.room + g.doctor}>
-              <div style={{ fontWeight: 700, fontSize: "0.9rem", marginBottom: "0.4rem" }}>
-                {g.room === "unassigned" ? "Unassigned" : roomDisplay(g.room)}
-                {g.doctor !== "—" && <span className="dim" style={{ fontWeight: 400 }}> · {g.doctor}</span>}
-              </div>
-              <div className="table-wrap">
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th>#</th><th>Patient</th><th>Acct</th><th>Type</th><th>Memo</th><th>Actions</th><th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {g.visits.map(v => (
-                      <tr key={v.id}>
-                        <td style={{ fontWeight: 700 }}>{v.token}</td>
-                        <td>
-                          <div>{v.name}</div>
-                          {(v.rank || v.policeServiceNo) && (
-                            <div className="dim" style={{ fontSize: "0.72rem" }}>
-                              {v.rank ? v.rank.replace(" of Police", "") : ""}{v.rank && v.policeServiceNo ? " · " : ""}{v.policeServiceNo ? "Svc:" + v.policeServiceNo : ""}
-                            </div>
-                          )}
-                        </td>
-                        <td className="mono" style={{ fontSize: "0.8rem" }}>{v.patientCategory || "—"}</td>
-                        <td style={{ fontSize: "0.82rem" }}>{v.consultationType}{v.isFollowUp ? " · F/U" : ""}</td>
-                        <td style={{ fontSize: "0.78rem" }}>
-                          {v.memoNo && <div className="mono">{v.memoNo}</div>}
-                          {v.labMemoNo && <div className="mono" style={{ color: "var(--blue)" }}>{v.labMemoNo}</div>}
-                          {!v.memoNo && !v.labMemoNo && <span className="dim">—</span>}
-                        </td>
-                        <td>
-                          <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
-                            {!v.labMemoNo && (
-                              <button className="btn btn-outline btn-sm" onClick={() => onLabMemo && onLabMemo(v)}>🧪 Lab</button>
-                            )}
-                            <button className="btn btn-outline btn-sm" onClick={() => onServiceMemo && onServiceMemo(v)}>📋 Svc</button>
-                            <button className="btn btn-outline btn-sm" onClick={() => reprint(v)} title="Reprint token">🖨</button>
-                          </div>
-                        </td>
-                        <td>
-                          {v.status === "waiting" && (
-                            <button className="btn btn-sm" style={{ background: "var(--red-bg, #fef2f2)", color: "var(--red)", border: "1px solid var(--red)" }}
-                              onClick={() => cancel(v)}>Cancel</button>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          ))}
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>#</th><th>Patient</th><th>Doctor</th><th>Acct</th><th>Type</th><th>Memo</th><th>Actions</th><th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map(v => (
+                <tr key={v.id}>
+                  <td style={{ fontWeight: 700 }}>{v.token}</td>
+                  <td>
+                    <div>{v.name}</div>
+                    {(v.rank || v.policeServiceNo) && (
+                      <div className="dim" style={{ fontSize: "0.72rem" }}>
+                        {v.rank ? v.rank.replace(" of Police", "") : ""}{v.rank && v.policeServiceNo ? " · " : ""}{v.policeServiceNo ? "Svc:" + v.policeServiceNo : ""}
+                      </div>
+                    )}
+                  </td>
+                  <td style={{ fontSize: "0.82rem" }}>{v.doctorName || "—"}</td>
+                  <td className="mono" style={{ fontSize: "0.8rem" }}>{v.patientCategory || "—"}</td>
+                  <td style={{ fontSize: "0.82rem" }}>{v.consultationType}{v.isFollowUp ? " · F/U" : ""}</td>
+                  <td style={{ fontSize: "0.78rem" }}>
+                    {v.memoNo && (
+                      <div className="mono" style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
+                        {v.memoNo}
+                        <button className="btn btn-outline btn-sm" style={{ padding: "0.1rem 0.35rem" }}
+                          onClick={async () => {
+                            try {
+                              const { memo, totals } = await fetchMemoForPrint(v.memoNo, "clinic");
+                              await printMemoDocument(memo, totals);
+                            } catch (e) { alert("Print failed: " + e.message); }
+                          }}>🖨</button>
+                      </div>
+                    )}
+                    {v.labMemoNo && (
+                      <div className="mono" style={{ color: "var(--blue)", display: "flex", alignItems: "center", gap: "0.3rem" }}>
+                        {v.labMemoNo}
+                        <button className="btn btn-outline btn-sm" style={{ padding: "0.1rem 0.35rem" }}
+                          onClick={async () => {
+                            try {
+                              const { memo, totals } = await fetchMemoForPrint(v.labMemoNo, "lab");
+                              await printMemoDocument(memo, totals);
+                            } catch (e) { alert("Print failed: " + e.message); }
+                          }}>🖨</button>
+                      </div>
+                    )}
+                    {!v.memoNo && !v.labMemoNo && <span className="dim">—</span>}
+                  </td>
+                  <td>
+                    <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
+                      {!v.labMemoNo && (
+                        <button className="btn btn-outline btn-sm" onClick={() => setMemoModal({ visit: v, type: "lab" })}>🧪 Lab</button>
+                      )}
+                      <button className="btn btn-outline btn-sm" onClick={() => setMemoModal({ visit: v, type: "clinic" })}>📋 Svc</button>
+                      
+                    </div>
+                  </td>
+                  <td>
+                    {v.status === "waiting" && (
+                      <button className="btn btn-sm" style={{ background: "var(--red-bg, #fef2f2)", color: "var(--red)", border: "1px solid var(--red)" }}
+                        onClick={() => cancel(v)}>Cancel</button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {memoModal && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1000, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "2rem 1rem", overflowY: "auto" }}>
+          <div style={{ background: "var(--surface)", borderRadius: "12px", maxWidth: "720px", width: "100%", padding: "1.5rem", position: "relative" }}>
+            <button className="btn btn-outline btn-sm" style={{ position: "absolute", top: "1rem", right: "1rem" }}
+              onClick={() => { setMemoModal(null); load(); }}>✕ Close</button>
+            <MemoTab
+              state={state}
+              presetVisit={memoModal.visit}
+              presetType={memoModal.type}
+              onClose={() => { setMemoModal(null); load(); }}
+            />
+          </div>
         </div>
       )}
     </div>
@@ -4097,10 +4210,10 @@ function calculateLineBilling(service, accountCode) {
   }
 }
 
-function MemoTab({ state }) {
+function MemoTab({ state, presetVisit, presetType, onClose }) {
   const { user } = useAuth();
-  const [memoType, setMemoType] = useState("clinic"); // clinic | lab
-  const [phase, setPhase] = useState("lookup");        // lookup | build | done
+  const [memoType, setMemoType] = useState(presetType || "clinic"); // clinic | lab
+  const [phase, setPhase] = useState(presetVisit ? "build" : "lookup");        // lookup | build | done
   const [idInput, setIdInput] = useState("");
   const [lookupMsg, setLookupMsg] = useState("");
   const [patient, setPatient] = useState(null);
@@ -4122,6 +4235,29 @@ function MemoTab({ state }) {
       getClinicId("MALE").then(setClinicId).catch(console.error);
     });
   }, []);
+
+  // Load preset patient/visit if provided (from Active Appointments)
+  useEffect(() => {
+    if (!presetVisit) return;
+    (async () => {
+      try {
+        const { getPatientByIdNumber } = await import("./supabase.js");
+        const p = await getPatientByIdNumber(presetVisit.patientId);
+        if (p) {
+          setPatient(p);
+          setAccountCode(p.category || presetVisit.patientCategory || "CACT");
+          setVisit({
+            id: presetVisit.id,
+            token: presetVisit.token,
+            doctorName: presetVisit.doctorName,
+            room: presetVisit.room,
+            consultationType: presetVisit.consultationType,
+            isFollowUp: presetVisit.isFollowUp,
+          });
+        }
+      } catch (e) { console.warn("preset load:", e.message); }
+    })();
+  }, [presetVisit]);
 
   // Apply pending consultation line once phase is "build" and lines are empty
   useEffect(() => {
@@ -4297,6 +4433,7 @@ function MemoTab({ state }) {
   };
 
   const reset = () => {
+    if (presetVisit && onClose) { onClose(); return; }
     setPhase("lookup"); setIdInput(""); setLookupMsg(""); setPatient(null);
     setVisit(null); setLines([]); setMsg(""); setGeneratedMemo(null);
     setServiceSearch(""); setServiceResults([]);
@@ -4695,6 +4832,178 @@ function DevRoomAssign({ state, setRoom }) {
       })}
     </div>
   );
+}
+
+
+// Standalone memo print function — reusable from MemoTab, ActiveAppointmentsTab, and booking confirmation
+async function printMemoDocument(m, totals) {
+  const trackUrl = `${APP_URL}/#memo?id=${m.id}&type=${m.memoType}`;
+  const qrDataUrl = await generateQRDataURL(trackUrl);
+  const acctLabel = ACCOUNT_LABELS[m.accountCode] || m.accountCode;
+  const today = new Date();
+  const dateStr = today.toLocaleDateString("en-GB") + " " + today.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+  const hasAccount  = ["PACT","FACT","BACT","EACT","WACT","WPACT","RACT"].includes(m.accountCode);
+  const hasAasandha = m.lines.some(l => l.aasandha > 0);
+  const hasPatient  = m.lines.some(l => l.patient > 0);
+
+  const w = window.open("", "_blank", "width=800,height=600");
+  w.document.write(`<!DOCTYPE html><html><head><title>${m.memo_no}</title>
+  <style>
+    body { font-family: Arial, sans-serif; font-size: 11px; margin: 20px; color: #000; }
+    .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
+    .memo-title { text-align: center; font-size: 16px; font-weight: bold; text-decoration: underline; margin-bottom: 12px; }
+    .patient-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 20px; margin-bottom: 12px; }
+    .field { display: flex; gap: 8px; }
+    .field-label { font-weight: bold; min-width: 80px; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+    th { border: 1px solid #000; padding: 4px 6px; background: #f0f0f0; text-align: left; font-size: 10px; }
+    td { border: 1px solid #000; padding: 4px 6px; font-size: 10px; }
+    td.num { text-align: right; }
+    .totals-row td { font-weight: bold; background: #f9f9f9; }
+    .payment { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+    .payment-box h4 { margin: 0 0 6px; font-size: 11px; }
+    .payment-row { display: flex; justify-content: space-between; font-size: 10px; margin-bottom: 2px; }
+    .footer { text-align: center; font-size: 9px; color: #555; border-top: 1px solid #ccc; padding-top: 6px; }
+    .non-refundable { font-size: 10px; font-style: italic; text-align: right; margin-bottom: 8px; }
+    .qr-section { text-align: center; margin-top: 8px; }
+    @media print { body { margin: 10px; } }
+  </style></head><body>
+  <div class="header">
+    <div>
+      <div style="font-family: monospace; font-size: 24px; letter-spacing: 3px;">|||||||||||||||</div>
+      <div style="font-size: 10px;">${m.memo_no}</div>
+    </div>
+    <div style="text-align: center; flex: 1;">
+      <div class="memo-title">${m.memoType === "lab" ? "LAB MEMO" : "SERVICE MEMO"}</div>
+    </div>
+    <div style="text-align: right;">
+      <div style="font-size: 18px; font-weight: bold; font-style: italic;">Noosandha</div>
+      <div style="font-size: 9px;">Clinic</div>
+    </div>
+  </div>
+
+  <div class="patient-grid">
+    <div class="field"><span class="field-label">Patient no:</span> ${m.patient.id_number}</div>
+    <div class="field"><span class="field-label">Memo no:</span> ${m.memo_no}</div>
+    <div class="field"><span class="field-label">Name:</span> ${m.patient.name}${m.patient.id_number ? " (" + m.patient.id_number + ")" : ""}</div>
+    <div class="field"><span class="field-label">Date:</span> ${dateStr}</div>
+    <div class="field"><span class="field-label">Address:</span> ${m.patient.address || "—"}</div>
+    <div class="field"><span class="field-label">User:</span> ${m.created_by || "—"}</div>
+    <div class="field"><span class="field-label">Age / Sex:</span> ${m.patient.dob ? (new Date().getFullYear() - new Date(m.patient.dob).getFullYear()) + " / " + (m.patient.sex || "—") : (m.patient.sex || "—")}</div>
+    <div class="field"><span class="field-label">${m.room ? roomDisplay(m.room) : ""}</span> ${m.token ? "Token " + m.token : ""}</div>
+    <div class="field" style="grid-column: span 2"><span class="field-label">Doctor:</span> ${m.doctor_name || "—"}</div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>CODE</th>
+        <th>SERVICE NAME</th>
+        <th class="num">CLINIC PRICE</th>
+        ${hasAasandha ? '<th class="num">AASANDHA</th>' : ""}
+        ${hasAccount ? '<th class="num">' + m.accountCode + '</th>' : ""}
+        ${hasPatient ? '<th class="num">PATIENT</th>' : ""}
+        <th class="num">TOTAL</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${m.lines.map(l => `
+        <tr>
+          <td>${l.code}</td>
+          <td>${l.name}${l.qty > 1 ? " x" + l.qty : ""}</td>
+          <td class="num">${l.total.toFixed(2)}</td>
+          ${hasAasandha ? '<td class="num">' + (l.aasandha > 0 ? l.aasandha.toFixed(2) : "—") + "</td>" : ""}
+          ${hasAccount  ? '<td class="num">' + (l.account  > 0 ? l.account.toFixed(2)  : "—") + "</td>" : ""}
+          ${hasPatient  ? '<td class="num">' + (l.patient  > 0 ? l.patient.toFixed(2)  : "—") + "</td>" : ""}
+          <td class="num">${l.total.toFixed(2)}</td>
+        </tr>
+      `).join("")}
+      <tr class="totals-row">
+        <td colspan="2"><strong>Total</strong></td>
+        <td class="num"><strong>${totals.total.toFixed(2)}</strong></td>
+        ${hasAasandha ? '<td class="num"><strong>' + totals.aasandha.toFixed(2) + "</strong></td>" : ""}
+        ${hasAccount  ? '<td class="num"><strong>' + totals.account.toFixed(2)  + "</strong></td>" : ""}
+        ${hasPatient  ? '<td class="num"><strong>' + totals.patient.toFixed(2)  + "</strong></td>" : ""}
+        <td class="num"><strong>${totals.total.toFixed(2)}</strong></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="non-refundable">Note: This memo is non-refundable.</div>
+
+  <div class="payment">
+    ${hasAccount ? `
+    <div class="payment-box">
+      <h4>Payment details:</h4>
+      <div class="payment-row"><span><strong>Account:</strong></span><span>${acctLabel}</span></div>
+      <div class="payment-row"><span><strong>Amount:</strong></span><span>MVR ${totals.account.toFixed(2)}</span></div>
+      <div class="payment-row"><span><strong>Ref no:</strong></span><span>${m.memo_no}</span></div>
+    </div>` : "<div></div>"}
+    ${hasAasandha ? `
+    <div class="payment-box">
+      <h4>&nbsp;</h4>
+      <div class="payment-row"><span><strong>Account:</strong></span><span>Aasandha</span></div>
+      <div class="payment-row"><span><strong>Amount:</strong></span><span>MVR ${totals.aasandha.toFixed(2)}</span></div>
+      <div class="payment-row"><span><strong>Transaction id:</strong></span><span>${m.memo_no}</span></div>
+    </div>` : ""}
+    ${hasPatient && !hasAccount ? `
+    <div class="payment-box">
+      <h4>Payment details:</h4>
+      <div class="payment-row"><span><strong>Amount:</strong></span><span>MVR ${totals.patient.toFixed(2)}</span></div>
+      <div class="payment-row"><span><strong>Ref no:</strong></span><span>${m.memo_no}</span></div>
+    </div>` : ""}
+  </div>
+
+  ${qrDataUrl ? `<div class="qr-section"><img src="${qrDataUrl}" width="80" height="80" alt="QR"/><div style="font-size:9px;color:#888">Scan to view memo</div></div>` : ""}
+
+  <div class="footer">
+    Noosandha Maldives, Maldives Police Service, Medical Service Department<br/>
+    Ameeneemagu, Male' Maldives, Phone: 3300078, 9514450 / Fax: 3011549
+  </div>
+  <script>setTimeout(() => window.print(), 400);</script>
+  </body></html>`);
+  w.document.close(); w.focus();
+}
+
+// Fetch a memo (clinic or lab) with full line items and patient data, ready to print
+async function fetchMemoForPrint(memoNo, type) {
+  const { supabase } = await import("./supabase.js");
+  const table = type === "lab" ? "lab_memos" : "memos";
+  const lineTable = type === "lab" ? "lab_memo_lines" : "memo_lines";
+  const fk = type === "lab" ? "lab_memo_id" : "memo_id";
+
+  const { data: memo, error: memoErr } = await supabase
+    .from(table).select("*, patients(*)").eq("memo_no", memoNo).single();
+  if (memoErr || !memo) throw new Error(memoErr?.message || "Memo not found");
+
+  const { data: lineRows, error: lineErr } = await supabase
+    .from(lineTable).select("*").eq(fk, memo.id).order("sort_order");
+  if (lineErr) throw new Error(lineErr.message);
+
+  const lines = (lineRows || []).map(l => ({
+    code: l.service_code, name: l.service_name, qty: l.qty,
+    aasandha: Number(l.aasandha_amount) || 0,
+    account: Number(l.account_amount) || 0,
+    patient: Number(l.patient_amount) || 0,
+    total: Number(l.line_total) || 0,
+  }));
+
+  const totals = lines.reduce((acc, l) => ({
+    aasandha: acc.aasandha + l.aasandha, account: acc.account + l.account,
+    patient: acc.patient + l.patient, total: acc.total + l.total,
+  }), { aasandha: 0, account: 0, patient: 0, total: 0 });
+
+  return {
+    memo: {
+      id: memo.id, memo_no: memo.memo_no, accountCode: memo.account_code,
+      doctor_name: memo.doctor_name, room: memo.room, token: memo.token,
+      created_by: memo.created_by, memoType: type,
+      patient: memo.patients,
+      lines,
+    },
+    totals,
+  };
 }
 
 const GLOBAL_CSS = `
