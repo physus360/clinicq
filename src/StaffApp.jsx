@@ -1521,7 +1521,7 @@ function AdminPortal() {
   const activeDoctors = Object.values(state.doctorDirectory || {}).filter((d) => d.active !== false);
 
   const assign = async (roomId, doctorId) => {
-    const d = doctorId ? state.doctorDirectory[doctorId] : null;
+    const d = doctorId ? activeDoctors.find(doc => doc.id === doctorId) : null;
     await setRoom(roomId, {
       assigned: d ? { id: d.id, name: d.name, department: d.specialty || "General", email: d.email || "" } : null,
       status: "IDLE", sessions: null, nowServing: null, upNext: null, customCall: null,
@@ -2739,12 +2739,23 @@ function ScheduleTab({ state, setState }) {
 function ReceptionPortal() {
   const { state, setRoom, ready } = useClinicState();
   const [tab, setTab] = useState("appointments");
+  const [activeDoctors, setActiveDoctors] = useState([]);
+  useEffect(() => {
+    import("./supabase.js").then(async ({ supabase, getClinicId }) => {
+      const clinicId = await getClinicId("MALE");
+      const { data } = await supabase.from("staff")
+        .select("*").eq("clinic_id", clinicId)
+        .eq("category", "doctor").eq("active", true).order("name");
+      setActiveDoctors((data || []).map(d => ({
+        id: d.email || d.name, name: d.name, email: d.email || "",
+        specialty: d.designation || "General", consultationTier: d.consultation_tier || "", active: true,
+      })));
+    }).catch(() => {});
+  }, [tab]);
   if (!ready) return <div className="portal-bg"><div className="portal-container"><div className="card dim">Loading…</div></div></div>;
 
-  const activeDoctors = Object.values(state.doctorDirectory || {}).filter((d) => d.active !== false);
-
   const assign = async (roomId, doctorId) => {
-    const d = doctorId ? state.doctorDirectory[doctorId] : null;
+    const d = doctorId ? activeDoctors.find(doc => doc.id === doctorId) : null;
     await setRoom(roomId, {
       assigned: d ? { id: d.id, name: d.name, department: d.specialty || "General", email: d.email || "" } : null,
       status: "IDLE", sessions: null, nowServing: null, upNext: null, customCall: null,
@@ -3079,6 +3090,7 @@ function BookAppointmentTab({ state }) {
   const [msg, setMsg] = useState("");
   const [msgType, setMsgType] = useState("info");
   const [bookConfirm, setBookConfirm] = useState(null); // { memoNo, token, name, doctorName } | null
+  const [bookStep, setBookStep] = useState(""); // progress message during booking
   const [busy, setBusy] = useState(false);
   const [lastTicket, setLastTicket] = useState(null);
 
@@ -3160,6 +3172,7 @@ function BookAppointmentTab({ state }) {
       const { upsertPatient, supabase, getClinicId, getServiceByCode, nextMemoNumber } = await import("./supabase.js");
 
       // 1. Save/update patient in Supabase
+      setBookStep("Saving patient…");
       let savedPatient;
       try {
         savedPatient = await upsertPatient({ ...patientForm, idNumber: id });
@@ -3177,6 +3190,7 @@ function BookAppointmentTab({ state }) {
       let memoWarning = "";
       const tier = doctor.consultationTier;
 
+      setBookStep("Creating memo…");
       if (!tier) {
         memoWarning = `No memo created: Dr. ${doctor.name} has no consultation tier set. Ask Admin to set it in Staff Directory, then create the memo manually from Active Appointments.`;
       } else if (TIER_CODES[tier]) {
@@ -3236,6 +3250,7 @@ function BookAppointmentTab({ state }) {
       }
 
       // 3. Get next token (Firestore — for real-time queue)
+      setBookStep("Assigning token…");
       let token;
       try {
         token = await nextTokenForDoctor(doctorId, apptDate);
@@ -3252,6 +3267,7 @@ function BookAppointmentTab({ state }) {
       }
 
       // 5. Save visit to Supabase
+      setBookStep("Saving appointment…");
       let visit;
       try {
         const { data, error: visitErr } = await supabase.from("visits").insert({
@@ -3307,7 +3323,7 @@ function BookAppointmentTab({ state }) {
       setMsg("Booking failed: " + e.message);
       setMsgType("error");
     }
-    finally { setBusy(false); }
+    finally { setBusy(false); setBookStep(""); }
   };
 
   const printTicket = async () => {
@@ -3405,6 +3421,13 @@ function BookAppointmentTab({ state }) {
                     );
                   })}
                 </select>
+                {doctorId && (() => {
+                  const selDoc = activeDoctors.find(d => d.id === doctorId);
+                  if (selDoc && !selDoc.consultationTier) {
+                    return <div style={{ fontSize: "0.75rem", color: "#b45309", marginTop: "0.3rem" }}>⚠ No consultation tier set — memo won't auto-generate. Ask Admin to set it.</div>;
+                  }
+                  return null;
+                })()}
                 {doctorId && !roomForDoctor(doctorId) && (
                   <div style={{ fontSize: "0.78rem", color: "var(--yellow)", marginTop: "0.3rem" }}>
                     Room not yet assigned — token will be reserved for this doctor.
@@ -3455,7 +3478,7 @@ function BookAppointmentTab({ state }) {
         {phase === "book" && (
           <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
             <button className="btn btn-green" onClick={book} disabled={busy || !doctorId}>
-              {busy ? "Booking…" : "Book & assign token"}
+              {busy ? (bookStep || "Booking…") : "Book & assign token"}
             </button>
             {lastTicket && <button className="btn btn-blue" onClick={printTicket}>🖨 Print token {lastTicket.token}</button>}
           </div>
@@ -3506,8 +3529,8 @@ function ActiveAppointmentsTab({ state }) {
         .eq("clinic_id", clinicId).eq("date", viewDate).eq("status", "active");
 
       const list = (data || []).map(v => {
-        const memo = (memos || []).find(m => m.patient_id === v.patient_id && m.doctor_name === v.doctor_name);
-        const labMemo = (labMemos || []).find(m => m.patient_id === v.patient_id && m.doctor_name === v.doctor_name);
+        const clinicMemos = (memos || []).filter(m => m.patient_id === v.patient_id && m.doctor_name === v.doctor_name).map(m => m.memo_no);
+        const labMemoList = (labMemos || []).filter(m => m.patient_id === v.patient_id && m.doctor_name === v.doctor_name).map(m => m.memo_no);
         return {
           id: v.id,
           patientId: v.patients?.id_number || "",
@@ -3525,8 +3548,10 @@ function ActiveAppointmentsTab({ state }) {
           consultationType: v.consultation_type || "Walk-in",
           isFollowUp: v.is_follow_up || false,
           supabaseVisitId: v.id,
-          memoNo: memo?.memo_no || null,
-          labMemoNo: labMemo?.memo_no || null,
+          clinicMemos,          // array of all clinic/service memo numbers
+          labMemos: labMemoList, // array of all lab memo numbers
+          memoNo: clinicMemos[0] || null,     // first clinic memo (consultation)
+          labMemoNo: labMemoList[0] || null,  // first lab memo
         };
       });
       // Most recent first (already ordered by created_at desc from query, but ensure)
@@ -3652,37 +3677,35 @@ function ActiveAppointmentsTab({ state }) {
                   <td className="mono" style={{ fontSize: "0.8rem" }}>{v.patientCategory || "—"}</td>
                   <td style={{ fontSize: "0.82rem" }}>{v.consultationType}{v.isFollowUp ? " · F/U" : ""}</td>
                   <td style={{ fontSize: "0.78rem" }}>
-                    {v.memoNo && (
-                      <div className="mono" style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
-                        {v.memoNo}
+                    {(v.clinicMemos || []).map(mNo => (
+                      <div key={mNo} className="mono" style={{ display: "flex", alignItems: "center", gap: "0.3rem", marginBottom: "0.15rem" }}>
+                        {mNo}
                         <button className="btn btn-outline btn-sm" style={{ padding: "0.1rem 0.35rem" }}
                           onClick={async () => {
                             try {
-                              const { memo, totals } = await fetchMemoForPrint(v.memoNo, "clinic");
+                              const { memo, totals } = await fetchMemoForPrint(mNo, "clinic");
                               await printMemoDocument(memo, totals);
                             } catch (e) { alert("Print failed: " + e.message); }
                           }}>🖨</button>
                       </div>
-                    )}
-                    {v.labMemoNo && (
-                      <div className="mono" style={{ color: "var(--blue)", display: "flex", alignItems: "center", gap: "0.3rem" }}>
-                        {v.labMemoNo}
+                    ))}
+                    {(v.labMemos || []).map(mNo => (
+                      <div key={mNo} className="mono" style={{ color: "var(--blue)", display: "flex", alignItems: "center", gap: "0.3rem", marginBottom: "0.15rem" }}>
+                        {mNo}
                         <button className="btn btn-outline btn-sm" style={{ padding: "0.1rem 0.35rem" }}
                           onClick={async () => {
                             try {
-                              const { memo, totals } = await fetchMemoForPrint(v.labMemoNo, "lab");
+                              const { memo, totals } = await fetchMemoForPrint(mNo, "lab");
                               await printMemoDocument(memo, totals);
                             } catch (e) { alert("Print failed: " + e.message); }
                           }}>🖨</button>
                       </div>
-                    )}
-                    {!v.memoNo && !v.labMemoNo && <span className="dim">—</span>}
+                    ))}
+                    {(!v.clinicMemos || v.clinicMemos.length === 0) && (!v.labMemos || v.labMemos.length === 0) && <span className="dim">—</span>}
                   </td>
                   <td>
                     <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
-                      {!v.labMemoNo && (
-                        <button className="btn btn-outline btn-sm" onClick={() => setMemoModal({ visit: v, type: "lab" })}>🧪 Lab</button>
-                      )}
+                      <button className="btn btn-outline btn-sm" onClick={() => setMemoModal({ visit: v, type: "lab" })}>🧪 Lab</button>
                       <button className="btn btn-outline btn-sm" onClick={() => setMemoModal({ visit: v, type: "clinic" })}>📋 Svc</button>
                       
                     </div>
