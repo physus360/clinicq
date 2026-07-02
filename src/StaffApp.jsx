@@ -4251,6 +4251,8 @@ function MemoTab({ state, presetVisit, presetType, onClose }) {
   const [generatedMemo, setGeneratedMemo] = useState(null);
   const [clinicId, setClinicId] = useState(null);
   const [pendingConsultation, setPendingConsultation] = useState(null);
+  const [quickPicks, setQuickPicks] = useState([]);
+  
 
   // Load clinic ID on mount
   useEffect(() => {
@@ -4258,6 +4260,8 @@ function MemoTab({ state, presetVisit, presetType, onClose }) {
       getClinicId("MALE").then(setClinicId).catch(console.error);
     });
   }, []);
+
+  
 
   // Load preset patient/visit if provided (from Active Appointments)
   useEffect(() => {
@@ -4374,6 +4378,10 @@ function MemoTab({ state, presetVisit, presetType, onClose }) {
       }]);
     }
     setServiceSearch(""); setServiceResults([]);
+    // Track usage for dynamic quick-picks (non-consultation services only)
+    if (clinicId && service?.code && !["CON0001","CON0002","CON0007","CON0008","CON0009","CON0013","CON0015","CON0022","CON0026","CON0027","CON0028","CON0032","CON0035"].includes(service.code)) {
+      import("./supabase.js").then(({ trackServiceUsage }) => trackServiceUsage(clinicId, service.code)).catch(() => {});
+    }
   };
 
   const recalcLine = (line, acCode) => {
@@ -4460,6 +4468,10 @@ function MemoTab({ state, presetVisit, presetType, onClose }) {
     setPhase("lookup"); setIdInput(""); setLookupMsg(""); setPatient(null);
     setVisit(null); setLines([]); setMsg(""); setGeneratedMemo(null);
     setServiceSearch(""); setServiceResults([]);
+    // Track usage for dynamic quick-picks (non-consultation services only)
+    if (clinicId && service?.code && !["CON0001","CON0002","CON0007","CON0008","CON0009","CON0013","CON0015","CON0022","CON0026","CON0027","CON0028","CON0032","CON0035"].includes(service.code)) {
+      import("./supabase.js").then(({ trackServiceUsage }) => trackServiceUsage(clinicId, service.code)).catch(() => {});
+    }
   };
 
   const printMemo = async () => {
@@ -4679,6 +4691,18 @@ function MemoTab({ state, presetVisit, presetType, onClose }) {
           {/* Service search */}
           <div className="card">
             <h2 className="card-title">Add Services</h2>
+            {quickPicks.length > 0 && (
+              <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap", marginBottom: "0.75rem" }}>
+                <span className="dim" style={{ fontSize: "0.75rem", alignSelf: "center" }}>Quick add:</span>
+                {quickPicks.map(s => (
+                  <button key={s.code} className="btn btn-outline btn-sm"
+                    onClick={() => addLine(s)}
+                    title={`${s.code} · MVR ${Number(s.clinic_price).toFixed(2)}`}>
+                    + {s.name.length > 24 ? s.name.slice(0, 24) + "…" : s.name}
+                  </button>
+                ))}
+              </div>
+            )}
             <div style={{ position: "relative" }}>
               <input className="field-input" placeholder={`Search ${memoType} services...`}
                 value={serviceSearch}
